@@ -16,17 +16,13 @@ from agent.catalog import (
     get_family,
 )
 from agent.models import (
-    CTAType,
-    EmailDraftComponents,
-    EvidenceReference,
+    EmailDraft,
     GenerationResult,
     GenerationStatus,
     ProductSelection,
     SelectionStatus,
-    ValidationStatus,
-    assemble_email_draft,
 )
-from agent.prompts import SYSTEM_PROMPT
+from agent.prompts import PROMPT_VERSION, SYSTEM_PROMPT
 
 
 class CatalogTests(unittest.TestCase):
@@ -120,33 +116,23 @@ class CatalogTests(unittest.TestCase):
 
 
 class ContractTests(unittest.TestCase):
-    def test_structured_components_assemble_into_two_or_three_paragraphs(self):
-        components = EmailDraftComponents(
+    def test_email_draft_requires_nonblank_content_and_catalog_metadata(self):
+        draft = EmailDraft(
             subject="A subject",
-            opening_paragraph=" Opening paragraph. ",
-            value_paragraph="Value paragraph.",
+            body="Opening paragraph.\n\nValue paragraph.",
             selected_product_family="accoya_wood",
             selected_application="standard_decking",
-            cta_type=CTAType.SAMPLE,
-            cta_text="Would reviewing a physical sample help with the current material evaluation?",
         )
-        self.assertEqual(
-            assemble_email_draft(components).body,
-            "Opening paragraph.\n\nValue paragraph.",
-        )
-        with_closing = components.model_copy(
-            update={"closing_paragraph": "Closing paragraph."}
-        )
-        self.assertEqual(
-            assemble_email_draft(with_closing).body.count("\n\n"),
-            2,
-        )
+        self.assertEqual(draft.subject, "A subject")
+        with self.assertRaises(ValidationError):
+            EmailDraft.model_validate(
+                {**draft.model_dump(), "subject": ""}
+            )
 
     def test_product_fields_are_null_only_for_explicit_low_confidence(self):
         low = ProductSelection(
             confidence=0.59,
             selection_status=SelectionStatus.LOW_CONFIDENCE,
-            missing_information=["No exterior application signal"],
         )
         self.assertIsNone(low.selected_product_family)
         self.assertIsNone(low.selected_application)
@@ -157,72 +143,48 @@ class ContractTests(unittest.TestCase):
                 selected_application="standard_decking",
                 confidence=0.59,
                 selection_status=SelectionStatus.LOW_CONFIDENCE,
+                retrieval_query="decking",
             )
         with self.assertRaises(ValidationError):
             ProductSelection(confidence=0.9)
 
-    def test_selected_product_requires_exact_source_trigger(self):
-        with self.assertRaisesRegex(ValidationError, "exact source"):
+    def test_selected_product_requires_model_retrieval_query(self):
+        with self.assertRaisesRegex(ValidationError, "retrieval query"):
             ProductSelection(
                 selected_product_family="accoya_wood",
                 selected_application="standard_decking",
                 confidence=0.9,
             )
-
         selected = ProductSelection(
             selected_product_family="accoya_wood",
             selected_application="standard_decking",
-            exact_source_trigger=EvidenceReference(
-                source_type="lead",
-                source_id="lead-1",
-                source_field="signal",
-                quote="Thermory walkway",
-            ),
-            cta_type=CTAType.SAMPLE,
             confidence=0.9,
+            retrieval_query="Accoya decking",
         )
-        self.assertEqual(selected.exact_source_trigger.quote, "Thermory walkway")
+        self.assertEqual(selected.retrieval_query, "Accoya decking")
 
-    def test_non_generated_result_cannot_expose_invalid_draft(self):
-        with self.assertRaisesRegex(ValidationError, "must not expose"):
+    def test_non_generated_result_cannot_expose_a_draft(self):
+        with self.assertRaisesRegex(ValidationError, "cannot expose"):
             GenerationResult(
-                status=GenerationStatus.VALIDATION_FAILED,
+                status=GenerationStatus.PROVIDER_ERROR,
                 lead_id="lead-1",
                 original_lead={"id": "lead-1"},
                 subject="Hidden",
                 body="Hidden",
                 prompt_version="test",
-                validation_status=ValidationStatus.INVALID,
             )
 
 
 class PromptTests(unittest.TestCase):
-    def test_system_prompt_contains_all_eleven_sections_and_versions(self):
-        headings = (
-            "1. ROLE AND OBJECTIVE",
-            "2. SOURCE-PRECEDENCE RULES",
-            "3. STATIC ACCOYA CATALOG",
-            "4. PRODUCT-SELECTION RULES",
-            "5. AUDIENCE-POSITIONING RULES",
-            "6. EMAIL STRUCTURE AND LENGTH",
-            "7. CLAIM ALLOWLIST AND PROHIBITED LANGUAGE",
-            "8. GROUNDING REQUIREMENTS",
-            "9. CTA-SELECTION RULES",
-            "10. STRUCTURED OUTPUT SCHEMA",
-            "11. FAILURE AND UNCERTAINTY BEHAVIOR",
-        )
-        positions = [SYSTEM_PROMPT.index(heading) for heading in headings]
-        self.assertEqual(positions, sorted(positions))
-        self.assertIn("Prompt version:", SYSTEM_PROMPT)
-        self.assertIn("Catalog version: 1.0.0", SYSTEM_PROMPT)
+    def test_system_prompt_is_concise_catalog_and_schema_prompt(self):
+        self.assertEqual(PROMPT_VERSION, "accoya-email-v2.0.0")
+        self.assertIn("CATALOG VERSION: 1.0.0", SYSTEM_PROMPT)
         for family in ("Accoya Wood", "Accoya Color Grey", "Tricoya Panels"):
             self.assertIn(family, SYSTEM_PROMPT)
-        for field in (
-            "opening_paragraph",
-            "value_paragraph",
-            "closing_paragraph",
-        ):
+        for field in ("retrieval_query", "subject", "body"):
             self.assertIn(field, SYSTEM_PROMPT)
+        for removed in ("lead_evidence_used", "repair_once", "approved_strategy"):
+            self.assertNotIn(removed, SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

@@ -78,11 +78,6 @@ def log_result(result: GenerationResult) -> None:
             "retrieved_document_ids": telemetry.retrieved_document_ids,
             "prompt_version": result.prompt_version,
             "model_name": telemetry.model_name,
-            "validation_violations": [
-                str(getattr(item.code, "value", item.code))
-                for item in result.validation_violations
-            ],
-            "repair_attempted": telemetry.repair_attempted,
             "latency_ms": telemetry.latency_ms,
             "input_tokens": telemetry.token_usage.input_tokens,
             "output_tokens": telemetry.token_usage.output_tokens,

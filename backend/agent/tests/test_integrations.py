@@ -29,7 +29,7 @@ class FakeBedrockClient:
 
 
 class BedrockStrategyRetrieverTests(unittest.TestCase):
-    def test_builds_approved_filter_and_maps_only_approved_chunks(self):
+    def test_request_has_no_filter_and_every_result_is_mapped(self):
         client = FakeBedrockClient(
             {
                 "retrievalResults": [
@@ -51,18 +51,17 @@ class BedrockStrategyRetrieverTests(unittest.TestCase):
                         "score": 0.99,
                     },
                     {
-                        "documentId": "doc-wrong-application",
-                        "content": {"text": "Approved but for siding."},
+                        "documentId": "doc-arbitrary",
+                        "content": {"text": "Arbitrary metadata is retained."},
                         "metadata": {
-                            "status": "approved",
+                            "status": "anything",
                             "application": "standard_siding",
                         },
-                        "score": 0.98,
+                        "score": "provider-score",
                     },
                     {
                         "documentId": "doc-empty",
                         "content": {"text": "  "},
-                        "metadata": {"status": "approved"},
                     },
                 ]
             }
@@ -74,14 +73,9 @@ class BedrockStrategyRetrieverTests(unittest.TestCase):
         chunks = retriever.retrieve(
             "Accoya decking planning architect",
             top_k=5,
-            metadata_filters={
-                "application": "standard_decking",
-                "status": "draft",  # callers cannot weaken the approved filter
-                "empty": " ",
-            },
         )
 
-        self.assertEqual(len(chunks), 1)
+        self.assertEqual(len(chunks), 4)
         self.assertEqual(chunks[0].document_id, "doc-approved")
         self.assertEqual(chunks[0].title, "Decking strategy")
         self.assertEqual(chunks[0].score, 0.91)
@@ -94,20 +88,11 @@ class BedrockStrategyRetrieverTests(unittest.TestCase):
             "vectorSearchConfiguration"
         ]
         self.assertEqual(vector["numberOfResults"], 5)
-        self.assertEqual(
-            vector["filter"],
-            {
-                "andAll": [
-                    {
-                        "equals": {
-                            "key": "application",
-                            "value": "standard_decking",
-                        }
-                    },
-                    {"equals": {"key": "status", "value": "approved"}},
-                ]
-            },
-        )
+        self.assertNotIn("filter", vector)
+        self.assertEqual(chunks[1].metadata, {"status": "draft"})
+        self.assertEqual(chunks[2].score, "provider-score")
+        self.assertEqual(chunks[3].text, "  ")
+        self.assertEqual(chunks[3].metadata, {})
 
     def test_derives_stable_document_id_and_title_when_provider_omits_them(self):
         response = {
@@ -139,7 +124,7 @@ class BedrockStrategyRetrieverTests(unittest.TestCase):
         self.assertEqual(retriever.retrieve("  "), [])
         self.assertEqual(client.calls, [])
 
-    def test_provider_failure_is_wrapped_once_without_unfiltered_retry(self):
+    def test_provider_failure_is_wrapped_once(self):
         client = FakeBedrockClient(error=RuntimeError("denied"))
         retriever = BedrockStrategyRetriever(client=client, knowledge_base_id="kb")
 
@@ -148,16 +133,16 @@ class BedrockStrategyRetrieverTests(unittest.TestCase):
 
         self.assertEqual(len(client.calls), 1)
 
-    def test_rejects_missing_configuration_and_out_of_range_top_k(self):
+    def test_rejects_missing_configuration_and_nonpositive_top_k(self):
         with self.assertRaisesRegex(ValueError, "BEDROCK_KB_ID"):
             BedrockStrategyRetriever(client=FakeBedrockClient(), knowledge_base_id=" ")
 
         retriever = BedrockStrategyRetriever(
             client=FakeBedrockClient(), knowledge_base_id="kb"
         )
-        for top_k in (3, 7):
+        for top_k in (0, -1):
             with self.subTest(top_k=top_k), self.assertRaisesRegex(
-                ValueError, "between 4 and 6"
+                ValueError, "positive"
             ):
                 retriever.retrieve("query", top_k=top_k)
 

@@ -1,48 +1,25 @@
-# Isolated Accoya Email Agent
+# Simplified Accoya Email Agent
 
-`backend/agent` is a standalone, synchronous LangGraph package that turns one
-complete lead mapping into at most one validated Accoya outreach draft. It is
-not registered with FastAPI and does not read or write the application database.
+`backend/agent` is a standalone synchronous LangGraph package that turns one
+lead mapping into at most one Accoya outreach email. It is not registered with
+FastAPI and does not read or write the application database.
 
 The package imports only `app.config` from the existing backend. Its Gemini,
-Bedrock Knowledge Base retrieval, catalog, prompts, validation, telemetry, and
-graph orchestration are folder-local; it does not import the legacy email, RAG,
-Gemini, Bedrock, or AWS service modules.
+Bedrock retrieval, catalog, prompts, telemetry, and graph orchestration remain
+folder-local; no legacy email, RAG, Gemini, Bedrock, or AWS service is imported.
 
 ## Install
 
-Python 3.11 or newer is required. Run from `backend/`:
+Run from `backend/`:
 
 ```powershell
 python -m pip install -r agent/requirements.txt
 ```
 
-The folder-local requirements file extends `backend/requirements.txt` and pins
-LangGraph to `1.2.9` so graph behavior remains reproducible.
-
-## Configuration
-
-`AccoyaEmailAgent.from_settings()` uses the existing `app.config.Settings`
-fields:
-
-- `GEMINI_API_KEY` and `GEMINI_MODEL` configure structured lead analysis and
-  email composition. The configured model name is used unchanged.
-- `BEDROCK_KB_ID`, `BEDROCK_KB_TOP_K`, `AWS_REGION`, and the optional AWS access
-  keys configure direct Bedrock Knowledge Base `Retrieve` calls.
-- When `BEDROCK_KB_ID` is blank, generation continues in claim-light,
-  catalog-only mode and returns a warning.
-- Bedrock results must have `status=approved` metadata. This restriction is
-  applied to the request and checked again on returned chunks.
-- Dependency-injected construction may add product-family, application,
-  audience, region, or other explicit metadata filters; every configured value
-  is enforced both in the Bedrock request and again after retrieval.
-
-Changing environment values still requires a process restart because the
-backend settings object is cached.
+The folder requirements extend `backend/requirements.txt` and pin LangGraph to
+`1.2.9`.
 
 ## Public API
-
-Run Python with `backend/` as the working directory:
 
 ```python
 from agent import AccoyaEmailAgent
@@ -53,93 +30,86 @@ result = agent.generate(
         "external_id": "feed-1042",
         "Project": "Riverside Walkway",
         "Location": "Sacramento, CA",
-        "Signal": "Thermory, or similar decking is being considered.",
+        "Signal": "Thermory decking is being considered.",
         "Timing": "Early planning",
-        "Contacts": "Taylor Smith - Project Architect, taylor@example.com",
     }
 )
-
-payload = result.model_dump(mode="json")
 ```
 
-`generate()` accepts a mapping with either snake_case field names or the current
-CSV display headers. The first nonblank value from `lead_id`, `id`, or
-`external_id` is required. Dashboard ranks such as `Lead #4` are rejected
-because they are not stable identifiers. All other current lead fields are
-optional, and an untouched deep copy is returned as `original_lead`.
+`generate()` accepts current snake_case fields or CSV display headers. The
+first nonblank value from `lead_id`, `id`, or `external_id` is required;
+dashboard ranks such as `Lead #4` are rejected. The result retains an untouched
+deep copy of the supplied mapping.
 
-Expected input fields include Section, Project, Location, State, Signal,
-Intelligence, Score, Timing, Next Step, Awarded To, Priority Reasons, Summary,
-Contacts, Meeting Date, Tags, and URL. Normalization parses common dates,
-contacts, tags, city/state, audience, project stage, and exact material or
-competitor mentions when present.
-
-The returned `GenerationResult.status` is one of:
+`GenerationResult.status` is one of:
 
 | Status | Meaning |
 | --- | --- |
-| `generated` | The subject and body passed deterministic validation. |
-| `insufficient_context` | Lead evidence did not support a catalog selection with at least `0.60` confidence. |
-| `validation_failed` | The initial draft and the single repair both failed; subject and body are withheld. |
-| `provider_error` | Structured analysis/composition was unavailable; subject and body are withheld. |
+| `generated` | Gemini returned a nonblank email whose product metadata matches the analyzed catalog pair. |
+| `insufficient_context` | Confidence was below `0.60` or the selected pair was outside the catalog. |
+| `provider_error` | Analysis/composition failed or composition returned a mismatched pair. |
 
-A generated result also includes the canonical product/application, lead
-evidence, cited approved strategy chunks, warnings, prompt version, UTC
-timestamp, validation state, and telemetry. Telemetry records model calls,
-available token counts, retrieval query/document IDs, repair use, and node/total
-latency. Logging uses the standard `accoya_email_agent` logger and does not
-configure global handlers or LangSmith.
+A result also includes the canonical family/application, every retrieved KB
+chunk, warnings, prompt version, UTC timestamp, and telemetry. There is no
+evidence ledger, validation status, violation list, or repair state.
 
 ## Fixed graph
 
-The compiled graph has no conditional loop or persistence hook:
-
 ```text
-START -> analyze_lead -> retrieve_strategy -> compose_and_validate -> END
+START -> analyze_lead -> retrieve_strategy -> compose_email -> END
 ```
 
-- `analyze_lead` normalizes the record, creates catalog-backed routing hints,
-  obtains a structured `ProductSelection`, and rejects unknown, unsupported, or
-  low-confidence selections. At most three benefit topics and one stage-routed
-  CTA category are retained.
-- `retrieve_strategy` calls Bedrock `Retrieve` for four to six results (five by
-  default). Missing configuration, empty approved results, or retrieval failure
-  produces a warning and safe catalog fallback; it never retries without the
-  approved filter.
-- `compose_and_validate` requests a structured email, checks formatting,
-  catalog membership, CTA, lead/strategy evidence, competitor and warranty
-  grounding, planning-stage wording, and the shared claim policy. An invalid
-  draft receives exactly one repair request containing its violation codes.
+- `analyze_lead` preserves the robust normalization and routing hints, then asks
+  Gemini for one catalog family/application, confidence, reason, and retrieval
+  query. The pair is accepted using only catalog membership and confidence.
+- `retrieve_strategy` makes one direct Bedrock `Retrieve` call using the
+  configured result count. It sends no metadata filter and retains every result
+  without checking approval status or other metadata.
+- `compose_email` asks Gemini for a subject, body, and the selected canonical
+  IDs. It requires only nonblank content and an exact pair match. There is no
+  deterministic email validator, retry, or repair call.
 
-The versioned catalog contains only Accoya Wood, Accoya Color Grey, and Tricoya
-Panels. Color Grey requires explicit grey/pre-greyed application relevance.
-Tricoya is always treated as a panel product, never solid lumber.
+Selected leads therefore make at most two Gemini calls. Low-confidence leads
+make one Gemini call and skip retrieval/composition provider work.
 
-## Safety boundaries
+## Knowledge Base behavior
 
-This package only returns a Pydantic result. It does not:
+Bedrock retrieval sends only the Gemini-generated query and
+`BEDROCK_KB_TOP_K`. Every provider result is mapped with its document ID, text,
+title, metadata, score, and location. A stable hash ID is derived only when
+Bedrock omits `documentId`.
 
-- register an HTTP route or change existing backend/frontend behavior;
-- query or mutate PostgreSQL, save a draft, update a lead, or send an email;
-- upload/delete S3 objects, start Knowledge Base ingestion, or scrape a website;
-- expose an invalid draft or run an unbounded model/repair loop.
+Missing configuration, an empty response, or retrieval failure adds a warning
+and composition continues using the lead and catalog without KB context. The
+retriever does not retry or add a broader/narrower filter.
 
-`from_settings()` can make live, billable Gemini and AWS calls. Use injected
-`StructuredModel` and `StrategyRetriever` fakes for automated checks.
+## Minimal composition guardrails
+
+The concise prompt requests a short subject, two or three paragraphs, one
+selected product/application, grounded use of lead and KB context, and one
+low-friction CTA. Retrieved text is explicitly treated as untrusted context.
+
+Code only checks that structured subject/body fields are nonblank and that the
+returned canonical pair exactly matches analysis. Length, citations, claims,
+warranties, competitor language, CTA wording, and evidence are not validated.
+
+## Safety boundary
+
+This package does not register routes, query PostgreSQL, save drafts, send
+email, mutate leads, upload documents, start KB ingestion, or scrape websites.
+`from_settings()` can make live, billable Gemini and AWS calls; automated tests
+use injected fakes.
 
 ## Tests
 
-All tests use `unittest` with fake model, Bedrock, and retrieval clients. They do
-not require a database, credentials, or network access. From `backend/` run:
+From `backend/`:
 
 ```powershell
 .\.venv\Scripts\python.exe -m compileall -q agent
 .\.venv\Scripts\python.exe -m unittest discover -s agent/tests -t . -p "test_*.py"
 ```
 
-Coverage includes stable IDs and normalization, every required product route,
-the complete prohibited-phrase policy, catalog/CTA/evidence/warranty validation,
-approved-only Bedrock mapping and failure fallback, graph order and metadata,
-low-confidence/provider outcomes, and the bounded single repair. The Beckstrom
-Cabin golden fixture is intentionally deferred until its complete real lead
-record is available; no synthetic record is substituted.
+The suite covers normalization, stable IDs, catalog/routing behavior, canonical
+selection and confidence, unfiltered Bedrock mapping, retrieval fallback, graph
+order, two-call bounds, raw chunk propagation, minimal draft matching, and safe
+provider errors. No test uses a database, network, or live provider.

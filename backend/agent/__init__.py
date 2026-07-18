@@ -4,7 +4,6 @@ from .models import (
     GenerationResult,
     GenerationStatus,
     ProductSelection,
-    ValidationStatus,
 )
 from .workflow import AccoyaEmailAgent
 
@@ -13,5 +12,4 @@ __all__ = [
     "GenerationResult",
     "GenerationStatus",
     "ProductSelection",
-    "ValidationStatus",
 ]

@@ -59,16 +59,15 @@ class StructuredModel(Protocol):
 
 
 class StrategyRetriever(Protocol):
-    """Minimal approved-strategy retrieval interface used by the graph."""
+    """Minimal unfiltered Knowledge Base retrieval interface."""
 
     def retrieve(
         self,
         query: str,
         *,
         top_k: int = 5,
-        metadata_filters: Mapping[str, str] | None = None,
     ) -> list[StrategyChunk]:
-        """Return only approved strategy chunks for ``query``."""
+        """Return raw Knowledge Base chunks for ``query``."""
 
 
 class UnavailableStructuredModel:
@@ -160,12 +159,7 @@ class GeminiStructuredModel:
 
 
 class BedrockStrategyRetriever:
-    """Direct Bedrock Knowledge Base ``Retrieve`` adapter.
-
-    Retrieval is always constrained to ``status=approved``.  Results are also
-    checked after retrieval so a provider/client inconsistency cannot admit an
-    unapproved document.
-    """
+    """Direct, unfiltered Bedrock Knowledge Base ``Retrieve`` adapter."""
 
     def __init__(self, *, client: Any, knowledge_base_id: str) -> None:
         if not knowledge_base_id.strip():
@@ -193,24 +187,15 @@ class BedrockStrategyRetriever:
         query: str,
         *,
         top_k: int = 5,
-        metadata_filters: Mapping[str, str] | None = None,
     ) -> list[StrategyChunk]:
         cleaned_query = query.strip()
         if not cleaned_query:
             return []
-        if not 4 <= top_k <= 6:
-            raise ValueError("top_k must be between 4 and 6")
-
-        filters: dict[str, str] = {"status": "approved"}
-        for key, value in (metadata_filters or {}).items():
-            clean_key = str(key).strip()
-            clean_value = str(value).strip()
-            if clean_key and clean_value and clean_key != "status":
-                filters[clean_key] = clean_value
+        if top_k < 1:
+            raise ValueError("top_k must be positive")
 
         vector_configuration: dict[str, Any] = {
             "numberOfResults": top_k,
-            "filter": _bedrock_filter(filters),
         }
         try:
             response = self._client.retrieve(
@@ -226,50 +211,26 @@ class BedrockStrategyRetriever:
         chunks: list[StrategyChunk] = []
         for result in response.get("retrievalResults", []):
             metadata = dict(result.get("metadata") or {})
-            if not all(
-                str(metadata.get(key, "")).strip().casefold()
-                == expected.strip().casefold()
-                for key, expected in filters.items()
-            ):
-                continue
-
-            text = str((result.get("content") or {}).get("text") or "").strip()
-            if not text:
-                continue
+            text = str((result.get("content") or {}).get("text") or "")
             location = dict(result.get("location") or {})
             source_uri = _source_location(location)
-            document_id = str(result.get("documentId") or "").strip()
+            document_id = str(result.get("documentId") or "")
             if not document_id:
                 digest_input = f"{source_uri}\n{text}".encode("utf-8")
                 document_id = f"derived-{sha256(digest_input).hexdigest()[:24]}"
 
             title = _document_title(metadata, source_uri, document_id)
-            score_value = result.get("score")
-            try:
-                score = float(score_value) if score_value is not None else None
-            except (TypeError, ValueError):
-                score = None
             chunks.append(
                 StrategyChunk(
                     document_id=document_id,
                     text=text,
                     title=title,
                     metadata=metadata,
-                    score=score,
+                    score=result.get("score"),
                     source_location=location or None,
                 )
             )
         return chunks
-
-
-def _bedrock_filter(filters: Mapping[str, str]) -> dict[str, Any]:
-    clauses = [
-        {"equals": {"key": key, "value": value}}
-        for key, value in sorted(filters.items())
-    ]
-    if len(clauses) == 1:
-        return clauses[0]
-    return {"andAll": clauses}
 
 
 def _source_location(location: Mapping[str, Any]) -> str:
