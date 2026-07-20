@@ -27,6 +27,7 @@ from .models import (
     GenerationTelemetry,
     MIN_SELECTION_CONFIDENCE,
     NormalizedLead,
+    NurturingRoute,
     ProductSelection,
     RoutingHint,
     SelectionStatus,
@@ -45,6 +46,7 @@ from .prompts import (
     SYSTEM_PROMPT,
     build_analysis_prompt,
     build_compose_prompt,
+    build_nurturing_route_prompt,
 )
 from .routing import get_routing_hints
 
@@ -162,11 +164,17 @@ class AccoyaEmailAgent:
                 )
         except Exception:
             telemetry = _record_failed_model_call(telemetry)
-            selection = _low_confidence_selection(
-                "Lead analysis provider was unavailable."
-            )
-            warnings.append("Lead analysis failed; no email was generated.")
-            error = "analysis_provider_error"
+            selection = _fallback_selection_from_hints(lead, hints)
+            if selection.selection_status is SelectionStatus.SELECTED:
+                warnings.append(
+                    "Lead analysis provider was unavailable; using deterministic routing fallback."
+                )
+                error = None
+            else:
+                warnings.append(
+                    "Lead analysis provider was unavailable and no deterministic routing hint was available."
+                )
+                error = "analysis_provider_error"
         telemetry = record_node_timing(telemetry, "analyze_lead", started_ms)
         return {
             "normalized_lead": lead,
@@ -183,7 +191,9 @@ class AccoyaEmailAgent:
         warnings = list(state.get("warnings", []))
         selection = state["selection"]
         chunks: list[StrategyChunk] = []
-        if state.get("error") is None and selection.selection_status is SelectionStatus.SELECTED:
+        nurturing_chunks: list[StrategyChunk] = []
+        nurturing_route = _fallback_nurturing_route(state["normalized_lead"])
+        if selection.selection_status is SelectionStatus.SELECTED:
             query = selection.retrieval_query
             telemetry = telemetry.model_copy(update={"retrieval_query": query})
             if self._retriever is None:
@@ -201,6 +211,49 @@ class AccoyaEmailAgent:
                     warnings.append(
                         "Knowledge Base retrieval failed; generating without KB context."
                     )
+
+            try:
+                route_invocation = self._model.invoke_structured(
+                    NurturingRoute,
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=build_nurturing_route_prompt(
+                        state["normalized_lead"],
+                        selection,
+                    ),
+                    temperature=0.1,
+                )
+                telemetry = add_usage(telemetry, route_invocation.usage)
+                nurturing_route = route_invocation.value
+            except Exception:
+                telemetry = _record_failed_model_call(telemetry)
+                warnings.append(
+                    "Nurturing route selection failed; using deterministic fallback route."
+                )
+
+        nurturing_route = nurturing_route.model_copy(
+            update={"retrieval_query": _nurturing_template_query(nurturing_route.email_number)}
+        )
+        
+        # Retrieve lead nurturing campaign guidelines (cached with ephemeral caching)
+        if self._retriever is None:
+            warnings.append(
+                "Nurturing Knowledge Base is not configured; generating without nurturing KB context."
+            )
+        else:
+            try:
+                nurturing_chunks = self._retriever.retrieve(
+                    nurturing_route.retrieval_query,
+                    top_k=5
+                )
+                if not nurturing_chunks:
+                    warnings.append(
+                        "Nurturing template retrieval returned no results for selected email template."
+                    )
+            except Exception:
+                warnings.append(
+                    "Nurturing template retrieval failed; generating without nurturing KB context."
+                )
+        
         telemetry = telemetry.model_copy(
             update={
                 "retrieval_count": len(chunks),
@@ -210,6 +263,8 @@ class AccoyaEmailAgent:
         telemetry = record_node_timing(telemetry, "retrieve_strategy", started_ms)
         return {
             "strategy_chunks": chunks,
+            "nurturing_route": nurturing_route,
+            "nurturing_chunks": nurturing_chunks,
             "warnings": warnings,
             "telemetry": telemetry,
         }
@@ -246,7 +301,11 @@ class AccoyaEmailAgent:
                 EmailDraft,
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=build_compose_prompt(
-                    state["normalized_lead"], selection, chunks
+                    state["normalized_lead"],
+                    selection,
+                    chunks,
+                    nurturing_chunks=state.get("nurturing_chunks", []),
+                    nurturing_route=state.get("nurturing_route"),
                 ),
                 temperature=0.3,
             )
@@ -321,6 +380,7 @@ class AccoyaEmailAgent:
         draft: EmailDraft | None = None,
     ) -> GenerationResult:
         selection = state["selection"]
+        nurturing_route = state.get("nurturing_route")
         return GenerationResult(
             status=status,
             lead_id=state["normalized_lead"].lead_id,
@@ -329,6 +389,15 @@ class AccoyaEmailAgent:
             body=draft.body if draft else None,
             selected_product_family=selection.selected_product_family,
             selected_application=selection.selected_application,
+            nurturing_email_number=(
+                nurturing_route.email_number if nurturing_route is not None else None
+            ),
+            nurturing_email_theme=(
+                nurturing_route.theme if nurturing_route is not None else None
+            ),
+            nurturing_kb_query=(
+                nurturing_route.retrieval_query if nurturing_route is not None else None
+            ),
             strategy_references=list(strategy_references),
             warnings=_deduplicate(warnings),
             prompt_version=PROMPT_VERSION,
@@ -380,6 +449,90 @@ def _low_confidence_selection(
         selection_reason=reason,
         retrieval_query="",
         selection_status=SelectionStatus.LOW_CONFIDENCE,
+    )
+
+
+def _fallback_selection_from_hints(
+    lead: NormalizedLead, hints: list[RoutingHint]
+) -> ProductSelection:
+    if not hints:
+        return _low_confidence_selection(
+            "Lead analysis provider was unavailable and no deterministic routing hint was available."
+        )
+    hint = hints[0]
+    return ProductSelection(
+        selected_product_family=hint.product_family,
+        selected_application=hint.application,
+        confidence=max(MIN_SELECTION_CONFIDENCE, 0.65),
+        selection_reason=(
+            "Deterministic fallback from routing hints after analysis provider failure."
+        ),
+        retrieval_query=_catalog_retrieval_query(lead, hint),
+        selection_status=SelectionStatus.SELECTED,
+    )
+
+
+def _catalog_retrieval_query(lead: NormalizedLead, hint: RoutingHint) -> str:
+    lead_terms = [
+        lead.project,
+        lead.section,
+        lead.signal,
+        lead.summary,
+        lead.timing,
+        lead.next_step,
+    ]
+    cleaned_terms = [term.strip() for term in lead_terms if isinstance(term, str) and term.strip()]
+    base = " ".join(cleaned_terms[:3]) if cleaned_terms else ""
+    return (
+        f"{hint.product_family} {hint.application} "
+        f"{base}"
+    ).strip()
+
+
+def _fallback_nurturing_route(lead: NormalizedLead) -> NurturingRoute:
+    stage = lead.project_stage
+    if stage.name == "PLANNING":
+        return NurturingRoute(
+            email_number=1,
+            theme="Design discovery and survey incentive",
+            retrieval_query=_nurturing_template_query(1),
+            rationale="Planning-stage leads are best served with discovery messaging first.",
+        )
+    if stage.name == "SPECIFICATION":
+        return NurturingRoute(
+            email_number=3,
+            theme="Case study and proof of concept",
+            retrieval_query=_nurturing_template_query(3),
+            rationale="Specification-stage leads respond to case-study proof and implementation confidence.",
+        )
+    if stage.name == "PROCUREMENT":
+        return NurturingRoute(
+            email_number=6,
+            theme="Specification readiness conversion push",
+            retrieval_query=_nurturing_template_query(6),
+            rationale="Procurement-stage leads are closer to conversion and need readiness-oriented CTAs.",
+        )
+    return NurturingRoute(
+        email_number=2,
+        theme="Performance and technical proof",
+        retrieval_query=_nurturing_template_query(2),
+        rationale="Unknown stage defaults to technical proof messaging before stronger conversion asks.",
+    )
+
+
+def _nurturing_template_query(email_number: int) -> str:
+    templates = {
+        1: "EMAIL 1 template structure subject preview body CTA survey incentive CEU tone section headings",
+        2: "EMAIL 2 template structure subject preview body CTA technical proof performance data video resource tone section headings",
+        3: "EMAIL 3 template structure subject preview body CTA case study proof of concept narrative tone section headings",
+        4: "EMAIL 4 template structure subject preview body CTA support partnership objection handling tone section headings",
+        5: "EMAIL 5 template structure subject preview body CTA objections deep dive benefit bullets tone section headings",
+        6: "EMAIL 6 template structure subject preview body CTA specification readiness conversion push tone section headings",
+        7: "EMAIL 7 template structure subject preview body CTA samples specs toolkit project kickoff tone section headings",
+    }
+    return templates.get(
+        email_number,
+        "EMAIL template structure subject preview body CTA tone section headings",
     )
 
 

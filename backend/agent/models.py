@@ -130,6 +130,15 @@ class ProductSelection(AgentModel):
         return self
 
 
+class NurturingRoute(AgentModel):
+    """LLM-selected nurturing email step and targeted retrieval query."""
+
+    email_number: int = Field(ge=1, le=7)
+    theme: str = Field(min_length=1)
+    retrieval_query: str = Field(min_length=1)
+    rationale: str = ""
+
+
 class StrategyChunk(AgentModel):
     """Raw Bedrock Knowledge Base retrieval result supplied to Gemini."""
 
@@ -156,6 +165,7 @@ class TokenUsage(AgentModel):
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     total_tokens: int | None = Field(default=None, ge=0)
+    cached_input_tokens: int | None = Field(default=None, ge=0)
 
 
 class GenerationTelemetry(AgentModel):
@@ -178,6 +188,9 @@ class GenerationResult(AgentModel):
     body: str | None = None
     selected_product_family: str | None = None
     selected_application: str | None = None
+    nurturing_email_number: int | None = Field(default=None, ge=1, le=7)
+    nurturing_email_theme: str | None = None
+    nurturing_kb_query: str | None = None
     strategy_references: list[StrategyChunk] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     prompt_version: str
@@ -199,7 +212,9 @@ class AgentState(TypedDict, total=False):
     normalized_lead: NormalizedLead
     routing_hints: list[RoutingHint]
     selection: ProductSelection
+    nurturing_route: NurturingRoute
     strategy_chunks: list[StrategyChunk]
+    nurturing_chunks: list[StrategyChunk]
     draft: EmailDraft
     warnings: list[str]
     error: str | None
@@ -213,6 +228,7 @@ StableIdKey = Literal["lead_id", "id", "external_id"]
 __all__ = [
     "AgentState", "AudienceType", "Contact", "EmailDraft", "EvidenceReference",
     "EvidenceSource", "GenerationResult", "GenerationStatus", "GenerationTelemetry",
-    "MIN_SELECTION_CONFIDENCE", "NormalizedLead", "ProductSelection", "ProjectStage",
-    "RoutingHint", "SelectionStatus", "StableIdKey", "StrategyChunk", "TokenUsage",
+    "MIN_SELECTION_CONFIDENCE", "NormalizedLead", "NurturingRoute", "ProductSelection",
+    "ProjectStage", "RoutingHint", "SelectionStatus", "StableIdKey", "StrategyChunk",
+    "TokenUsage",
 ]
