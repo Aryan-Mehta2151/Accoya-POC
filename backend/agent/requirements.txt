@@ -1,0 +1,4 @@
+-r ../requirements.txt
+
+# The workflow is intentionally pinned so graph behavior remains reproducible.
+langgraph==1.2.9
