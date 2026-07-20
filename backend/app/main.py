@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import chat, documents, emails, leads
+from app.api.routes import agent, chat, documents, emails, leads
 from app.config import get_settings
 from app.db.database import init_db
 
@@ -37,3 +37,4 @@ app.include_router(leads.router, prefix=settings.api_prefix)
 app.include_router(documents.router, prefix=settings.api_prefix)
 app.include_router(emails.router, prefix=settings.api_prefix)
 app.include_router(chat.router, prefix=settings.api_prefix)
+app.include_router(agent.router, prefix=settings.api_prefix)

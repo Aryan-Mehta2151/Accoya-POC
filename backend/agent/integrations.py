@@ -129,6 +129,15 @@ class GeminiStructuredModel:
                 model=self._model_name,
                 google_api_key=self._api_key,
                 temperature=temperature,
+                model_kwargs={
+                    "system_instruction": [
+                        {
+                            "type": "text",
+                            "text": system_prompt,
+                            "cache_control": {"type": "EPHEMERAL"}
+                        }
+                    ]
+                }
             )
             runnable = llm.with_structured_output(schema, include_raw=True)
             response = runnable.invoke(
@@ -267,10 +276,17 @@ def _token_usage(value: Mapping[str, Any] | None) -> TokenUsage:
     total_tokens = _optional_token_count(usage.get("total_tokens"))
     if total_tokens is None and (input_tokens is not None or output_tokens is not None):
         total_tokens = (input_tokens or 0) + (output_tokens or 0)
+    input_details = usage.get("input_token_details")
+    cached_input_tokens = (
+        _optional_token_count(input_details.get("cache_read"))
+        if isinstance(input_details, Mapping)
+        else None
+    )
     return TokenUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=total_tokens,
+        cached_input_tokens=cached_input_tokens,
     )
 
 

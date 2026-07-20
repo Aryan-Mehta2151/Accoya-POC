@@ -1,11 +1,16 @@
 """Application configuration loaded from environment variables."""
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent
+_ENV_PATH = _BACKEND_ROOT / ".env"
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(_ENV_PATH), extra="ignore")
 
     # App
     app_env: str = "development"
@@ -30,7 +35,7 @@ class Settings(BaseSettings):
 
     # Gemini
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-1.5-pro"
+    gemini_model: str = "gemini-3.5-flash"
 
     # Lead source API (EarlyBid feed)
     lead_api_base_url: str = "https://api.earlybid.bid"

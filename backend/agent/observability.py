@@ -30,6 +30,9 @@ def add_usage(
         input_tokens=_sum_optional(current.input_tokens, usage.input_tokens),
         output_tokens=_sum_optional(current.output_tokens, usage.output_tokens),
         total_tokens=_sum_optional(current.total_tokens, usage.total_tokens),
+        cached_input_tokens=_sum_optional(
+            current.cached_input_tokens, usage.cached_input_tokens
+        ),
     )
     return telemetry.model_copy(
         update={
@@ -82,6 +85,7 @@ def log_result(result: GenerationResult) -> None:
             "input_tokens": telemetry.token_usage.input_tokens,
             "output_tokens": telemetry.token_usage.output_tokens,
             "total_tokens": telemetry.token_usage.total_tokens,
+            "cached_input_tokens": telemetry.token_usage.cached_input_tokens,
         },
     )
 

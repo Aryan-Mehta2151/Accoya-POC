@@ -24,3 +24,6 @@ build/
 *.sqlite3
 *.tmp
 .tmp*
+
+# Local sqlite runtime
+*.db
