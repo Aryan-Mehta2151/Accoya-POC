@@ -1,54 +1,68 @@
-"""Generate a personalized outreach email for a lead using RAG + Gemini."""
-from app.db.models import Lead
-from app.services import bedrock_service, gemini_service
+"""Application service for generating lead emails with the Accoya agent."""
 
-_EMAIL_SYSTEM = (
-    "You are an expert B2B copywriter writing a personalized cold outreach email "
-    "on behalf of our client. Use the lead's details and the strategy context to "
-    "craft a concise, relevant, non-spammy email. Return a subject line and a body."
+from __future__ import annotations
+
+from collections.abc import Mapping
+from functools import lru_cache
+from typing import Any, Protocol
+
+from agent import AccoyaEmailAgent
+from agent.models import GenerationResult
+
+from app.db.models import Lead
+
+
+class EmailAgent(Protocol):
+    """Minimal agent interface used by the email application service."""
+
+    def generate(self, complete_lead_record: Mapping[str, Any]) -> GenerationResult:
+        """Generate one email result from a curated lead mapping."""
+
+
+# Keep this list explicit: ``NormalizedLead.source_values`` is included in model
+# prompts, so passing an ORM ``__dict__`` or the complete raw feed row would expose
+# fields that the email workflow has not deliberately approved.
+_AGENT_LEAD_FIELDS = (
+    "section",
+    "project",
+    "location",
+    "state",
+    "signal",
+    "intelligence",
+    "score",
+    "timing",
+    "next_step",
+    "awarded_to",
+    "priority_reasons",
+    "summary",
+    "contacts",
+    "contact_email",
+    "meeting_date",
+    "tags",
+    "url",
 )
 
 
-def generate_email(lead: Lead) -> tuple[str, str]:
-    """Return (subject, body) for the given lead/opportunity."""
-    lead_summary = (
-        f"Project: {lead.project}\n"
-        f"Location: {lead.location}, {lead.state}\n"
-        f"Section: {lead.section}\n"
-        f"Signal: {lead.signal} | Stage: {lead.intelligence}\n"
-        f"Timing: {lead.timing}\n"
-        f"Why relevant: {lead.priority_reasons}\n"
-        f"Summary: {lead.summary}\n"
-        f"Contact: {lead.contacts}\n"
-        f"Source: {lead.url}"
-    )
+@lru_cache
+def get_accoya_email_agent() -> AccoyaEmailAgent:
+    """Return the process-wide agent instance used by FastAPI dependencies."""
 
-    # Retrieve strategy context relevant to this opportunity.
-    query = f"Outreach strategy for {lead.project or ''} in {lead.location or ''} {lead.state or ''}".strip()
-    chunks = bedrock_service.retrieve(query)
-    strategy_context = "\n\n---\n\n".join(c.text for c in chunks)
-
-    prompt = (
-        f"{_EMAIL_SYSTEM}\n\n"
-        f"Strategy context:\n{strategy_context}\n\n"
-        f"Lead:\n{lead_summary}\n\n"
-        "Respond in exactly this format:\n"
-        "SUBJECT: <subject line>\n"
-        "BODY:\n<email body>"
-    )
-
-    raw = gemini_service.generate(prompt, temperature=0.6)
-    return _parse(raw)
+    return AccoyaEmailAgent.from_settings()
 
 
-def _parse(raw: str) -> tuple[str, str]:
-    subject, body = "", raw.strip()
-    if "SUBJECT:" in raw:
-        after = raw.split("SUBJECT:", 1)[1]
-        if "BODY:" in after:
-            subject_part, body_part = after.split("BODY:", 1)
-            subject = subject_part.strip()
-            body = body_part.strip()
-        else:
-            subject = after.strip()
-    return subject, body
+def build_agent_lead(lead: Lead) -> dict[str, Any]:
+    """Map a stored lead to the only fields approved for agent prompts."""
+
+    payload: dict[str, Any] = {
+        "lead_id": str(lead.id),
+        "source_system": lead.source_system,
+        "external_id": lead.external_id,
+    }
+    payload.update({field: getattr(lead, field) for field in _AGENT_LEAD_FIELDS})
+    return payload
+
+
+def generate_email(lead: Lead, agent: EmailAgent) -> GenerationResult:
+    """Invoke the Accoya agent for one persisted lead."""
+
+    return agent.generate(build_agent_lead(lead))

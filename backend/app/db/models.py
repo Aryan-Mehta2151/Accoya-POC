@@ -1,18 +1,42 @@
-"""SQLAlchemy ORM models."""
+"""SQLAlchemy ORM models for the agent-centric application database."""
+
 from __future__ import annotations
 
 import enum
 import uuid
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
 
 
 def _uuid() -> str:
+    """Return a UUID string while PostgreSQL stores it in a native UUID column."""
+
     return str(uuid.uuid4())
+
+
+# JSON keeps provider-free SQLite unit tests useful; PostgreSQL receives JSONB.
+_JSONB = JSON().with_variant(JSONB(), "postgresql")
+_UUID = Uuid(as_uuid=False)
 
 
 class EmailStatus(str, enum.Enum):
@@ -23,64 +47,287 @@ class EmailStatus(str, enum.Enum):
     rejected = "rejected"
 
 
-class Lead(Base):
-    """A single opportunity from the EarlyBid feed (one row = one card in the UI).
+class AgentRunStatus(str, enum.Enum):
+    running = "running"
+    generated = "generated"
+    insufficient_context = "insufficient_context"
+    provider_error = "provider_error"
+    system_error = "system_error"
 
-    Mirrors the `earlystack_client_feed_v1` CSV schema. `external_id` is the feed's
-    stable opportunity id, used for upsert/dedupe on daily sync.
-    """
+
+_EMAIL_STATUS = Enum(EmailStatus, name="email_status")
+_AGENT_RUN_STATUS = Enum(AgentRunStatus, name="agent_run_status")
+
+
+class Lead(Base):
+    """The current normalized projection of one source opportunity."""
 
     __tablename__ = "leads"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_system",
+            "external_id",
+            name="uq_leads_source_system_external_id",
+        ),
+        Index("ix_leads_score", "score"),
+        Index("ix_leads_archived_at", "archived_at"),
+    )
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    external_id: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
+    source_system: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="earlybid",
+        server_default="earlybid",
+    )
+    external_id: Mapped[str] = mapped_column(Text, nullable=False)
 
-    section: Mapped[str | None] = mapped_column(String(64))
-    project: Mapped[str | None] = mapped_column(String(512))
-    location: Mapped[str | None] = mapped_column(String(255))
-    state: Mapped[str | None] = mapped_column(String(8))
-    signal: Mapped[str | None] = mapped_column(String(32))
-    intelligence: Mapped[str | None] = mapped_column(String(32))
-    score: Mapped[int | None] = mapped_column(Integer)
-    timing: Mapped[str | None] = mapped_column(String(512))
+    # Agent input text is deliberately unrestricted; provider prompt limits are
+    # an application concern rather than a persistence truncation policy.
+    section: Mapped[str | None] = mapped_column(Text)
+    project: Mapped[str | None] = mapped_column(Text)
+    location: Mapped[str | None] = mapped_column(Text)
+    state: Mapped[str | None] = mapped_column(Text)
+    signal: Mapped[str | None] = mapped_column(Text)
+    intelligence: Mapped[str | None] = mapped_column(Text)
+    score: Mapped[float | None] = mapped_column(Float)
+    timing: Mapped[str | None] = mapped_column(Text)
+    next_step: Mapped[str | None] = mapped_column(Text)
     awarded_to: Mapped[str | None] = mapped_column(Text)
     priority_reasons: Mapped[str | None] = mapped_column(Text)
     summary: Mapped[str | None] = mapped_column(Text)
     contacts: Mapped[str | None] = mapped_column(Text)
-    # Contact email parsed out of `contacts`; the approved email is sent here.
-    contact_email: Mapped[str | None] = mapped_column(String(320))
-    meeting_date: Mapped[str | None] = mapped_column(String(32))
-    tags: Mapped[str | None] = mapped_column(Text)
+    contact_email: Mapped[str | None] = mapped_column(Text)
+    meeting_date: Mapped[str | None] = mapped_column(Text)
+    tags: Mapped[list[str] | str | None] = mapped_column(_JSONB)
     url: Mapped[str | None] = mapped_column(Text)
 
-    # Full original row (JSON) for fidelity, and where it came from.
-    raw_data: Mapped[str | None] = mapped_column(Text)
-    source_feed: Mapped[str | None] = mapped_column(String(255))
+    raw_data: Mapped[dict[str, Any]] = mapped_column(
+        _JSONB,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    source_feed: Mapped[str | None] = mapped_column(Text)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    agent_runs: Mapped[list[AgentRun]] = relationship(
+        back_populates="lead",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
-    emails: Mapped[list[Email]] = relationship(back_populates="lead", cascade="all, delete-orphan")
+
+class AgentRun(Base):
+    """One immutable terminal attempt to generate outreach for a lead."""
+
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "length(input_hash) = 64",
+            name="ck_agent_runs_input_hash_sha256",
+        ),
+        CheckConstraint(
+            "nurturing_email_number IS NULL OR "
+            "nurturing_email_number BETWEEN 1 AND 7",
+            name="ck_agent_runs_nurturing_email_number",
+        ),
+        CheckConstraint(
+            "model_calls >= 0 AND retrieval_count >= 0",
+            name="ck_agent_runs_operation_counts_nonnegative",
+        ),
+        CheckConstraint(
+            "(input_tokens IS NULL OR input_tokens >= 0) AND "
+            "(output_tokens IS NULL OR output_tokens >= 0) AND "
+            "(total_tokens IS NULL OR total_tokens >= 0) AND "
+            "(latency_ms IS NULL OR latency_ms >= 0)",
+            name="ck_agent_runs_telemetry_nonnegative",
+        ),
+        CheckConstraint(
+            "(status = 'running' AND completed_at IS NULL "
+            "AND original_subject IS NULL AND original_body IS NULL) OR "
+            "(status = 'generated' AND completed_at IS NOT NULL "
+            "AND original_subject IS NOT NULL AND original_body IS NOT NULL) OR "
+            "(status IN ('insufficient_context', 'provider_error', 'system_error') "
+            "AND completed_at IS NOT NULL "
+            "AND original_subject IS NULL AND original_body IS NULL)",
+            name="ck_agent_runs_terminal_shape",
+        ),
+        Index("ix_agent_runs_lead_started_at", "lead_id", "started_at"),
+        Index("ix_agent_runs_status_started_at", "status", "started_at"),
+        Index("ix_agent_runs_retry_of_run_id", "retry_of_run_id"),
+        Index("ix_agent_runs_started_at_id", "started_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
+    lead_id: Mapped[str] = mapped_column(
+        _UUID,
+        ForeignKey("leads.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    retry_of_run_id: Mapped[str | None] = mapped_column(
+        _UUID,
+        ForeignKey("agent_runs.id", ondelete="RESTRICT"),
+    )
+    status: Mapped[AgentRunStatus] = mapped_column(
+        _AGENT_RUN_STATUS,
+        nullable=False,
+        default=AgentRunStatus.running,
+        server_default=AgentRunStatus.running.value,
+    )
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    selected_product_family: Mapped[str | None] = mapped_column(Text)
+    selected_application: Mapped[str | None] = mapped_column(Text)
+    nurturing_email_number: Mapped[int | None] = mapped_column(Integer)
+    nurturing_email_theme: Mapped[str | None] = mapped_column(Text)
+    warnings: Mapped[list[str]] = mapped_column(
+        _JSONB,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    error_code: Mapped[str | None] = mapped_column(Text)
+
+    # This is the immutable generated draft. Human edits are stored on Email.
+    original_subject: Mapped[str | None] = mapped_column(Text)
+    original_body: Mapped[str | None] = mapped_column(Text)
+
+    prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
+    catalog_version: Mapped[str] = mapped_column(Text, nullable=False)
+    model_name: Mapped[str] = mapped_column(Text, nullable=False)
+    model_calls: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    retrieval_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    total_tokens: Mapped[int | None] = mapped_column(Integer)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    lead: Mapped[Lead] = relationship(back_populates="agent_runs")
+    retry_of: Mapped[AgentRun | None] = relationship(
+        remote_side="AgentRun.id",
+        back_populates="retries",
+        foreign_keys=[retry_of_run_id],
+    )
+    retries: Mapped[list[AgentRun]] = relationship(
+        back_populates="retry_of",
+        foreign_keys=[retry_of_run_id],
+    )
+    email: Mapped[Email | None] = relationship(
+        back_populates="agent_run",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
 
 
 class Email(Base):
-    """A generated outreach email for a lead, moving through the approval workflow."""
+    """The mutable, human-reviewed copy of a generated run draft."""
 
     __tablename__ = "emails"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    lead_id: Mapped[str] = mapped_column(ForeignKey("leads.id"))
-    subject: Mapped[str | None] = mapped_column(String(512))
-    body: Mapped[str] = mapped_column(Text)
-    status: Mapped[EmailStatus] = mapped_column(Enum(EmailStatus), default=EmailStatus.draft)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    __table_args__ = (
+        UniqueConstraint("agent_run_id", name="uq_emails_agent_run_id"),
+        Index("ix_emails_status_created_at", "status", "created_at"),
     )
 
-    lead: Mapped[Lead] = relationship(back_populates="emails")
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
+    agent_run_id: Mapped[str] = mapped_column(
+        _UUID,
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    recipient_email: Mapped[str | None] = mapped_column(Text)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[EmailStatus] = mapped_column(
+        _EMAIL_STATUS,
+        nullable=False,
+        default=EmailStatus.pending_review,
+        server_default=EmailStatus.pending_review.value,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    agent_run: Mapped[AgentRun] = relationship(
+        back_populates="email",
+        lazy="joined",
+    )
+    status_events: Mapped[list[EmailStatusEvent]] = relationship(
+        back_populates="email",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="EmailStatusEvent.created_at",
+    )
+
+    @property
+    def lead_id(self) -> str:
+        """Keep the existing EmailRead wire shape without duplicating lead_id."""
+
+        return self.agent_run.lead_id
+
+
+class EmailStatusEvent(Base):
+    """Append-only audit record for an email review-status transition."""
+
+    __tablename__ = "email_status_events"
+    __table_args__ = (
+        Index("ix_email_status_events_email_created_at", "email_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
+    email_id: Mapped[str] = mapped_column(
+        _UUID,
+        ForeignKey("emails.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    previous_status: Mapped[EmailStatus | None] = mapped_column(_EMAIL_STATUS)
+    new_status: Mapped[EmailStatus] = mapped_column(_EMAIL_STATUS, nullable=False)
+    actor: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    email: Mapped[Email] = relationship(back_populates="status_events")
 
 
 class ChatMessage(Base):
@@ -88,20 +335,28 @@ class ChatMessage(Base):
 
     __tablename__ = "chat_messages"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
     session_id: Mapped[str] = mapped_column(String(36), index=True)
     role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
     content: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
 
 
 class StrategyDocument(Base):
-    """Metadata for uploaded strategy docs stored in S3 and indexed in Bedrock KB."""
+    """Metadata for strategy docs stored in S3 and indexed in Bedrock KB."""
 
     __tablename__ = "strategy_documents"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
     filename: Mapped[str] = mapped_column(String(512))
     s3_key: Mapped[str] = mapped_column(String(1024))
     content_type: Mapped[str | None] = mapped_column(String(255))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )

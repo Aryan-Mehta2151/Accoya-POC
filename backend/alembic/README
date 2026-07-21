@@ -1,0 +1,5 @@
+This is a greenfield Alembic history for the agent-centric database.
+
+Run migrations through ``python -m app.db.bootstrap`` from ``backend/``. The
+command creates the configured PostgreSQL database when absent and upgrades it
+to the current head. Existing legacy databases are intentionally not imported.

@@ -117,13 +117,14 @@ class CatalogTests(unittest.TestCase):
 
 class ContractTests(unittest.TestCase):
     def test_email_draft_requires_nonblank_content_and_catalog_metadata(self):
+        long_subject = "S" * 5000
         draft = EmailDraft(
-            subject="A subject",
+            subject=long_subject,
             body="Opening paragraph.\n\nValue paragraph.",
             selected_product_family="accoya_wood",
             selected_application="standard_decking",
         )
-        self.assertEqual(draft.subject, "A subject")
+        self.assertEqual(draft.subject, long_subject)
         with self.assertRaises(ValidationError):
             EmailDraft.model_validate(
                 {**draft.model_dump(), "subject": ""}
@@ -177,11 +178,11 @@ class ContractTests(unittest.TestCase):
 
 class PromptTests(unittest.TestCase):
     def test_system_prompt_is_concise_catalog_and_schema_prompt(self):
-        self.assertEqual(PROMPT_VERSION, "accoya-email-v2.0.0")
+        self.assertEqual(PROMPT_VERSION, "accoya-email-v2.2.0")
         self.assertIn("CATALOG VERSION: 1.0.0", SYSTEM_PROMPT)
         for family in ("Accoya Wood", "Accoya Color Grey", "Tricoya Panels"):
             self.assertIn(family, SYSTEM_PROMPT)
-        for field in ("retrieval_query", "subject", "body"):
+        for field in ("retrieval_query", "email_number", "subject", "body"):
             self.assertIn(field, SYSTEM_PROMPT)
         for removed in ("lead_evidence_used", "repair_once", "approved_strategy"):
             self.assertNotIn(removed, SYSTEM_PROMPT)

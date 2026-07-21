@@ -33,7 +33,7 @@ class AgentTraceResponse(BaseModel):
     normalized_lead: NormalizedLead
     routing_hints: list[RoutingHint]
     selection: ProductSelection
-    nurturing_route: NurturingRoute
+    nurturing_route: NurturingRoute | None = None
     strategy_chunks: list[StrategyChunk]
     nurturing_chunks: list[StrategyChunk]
     warnings: list[str]

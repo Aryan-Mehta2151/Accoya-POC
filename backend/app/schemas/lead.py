@@ -1,10 +1,14 @@
 """Pydantic schemas for leads (EarlyBid opportunities)."""
 from datetime import datetime
+import json
+from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class LeadRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     external_id: str
     section: str | None = None
@@ -13,7 +17,7 @@ class LeadRead(BaseModel):
     state: str | None = None
     signal: str | None = None
     intelligence: str | None = None
-    score: int | None = None
+    score: float | None = None
     timing: str | None = None
     awarded_to: str | None = None
     priority_reasons: str | None = None
@@ -26,8 +30,21 @@ class LeadRead(BaseModel):
     source_feed: str | None = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    @field_validator("id", mode="before")
+    @classmethod
+    def serialize_native_uuid(cls, value: Any) -> str:
+        """Keep the existing string ID wire contract with native UUID storage."""
+        return str(value)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def serialize_json_tags(cls, value: Any) -> str | None:
+        """Keep the existing string-or-null frontend contract for JSONB tags."""
+        if value is None or isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return ", ".join(str(item) for item in value)
+        return json.dumps(value, separators=(",", ":"), sort_keys=True)
 
 
 class SyncResult(BaseModel):

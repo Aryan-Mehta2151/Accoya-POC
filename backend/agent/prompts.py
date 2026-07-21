@@ -32,8 +32,8 @@ credible match for the lead. Return the canonical IDs, confidence, a short reaso
 and a useful Knowledge Base retrieval query. If there is no credible match, return
 an explicit low-confidence result with null product fields.
 
-For composition, use only the selected family/application. Write a short subject
-and a professional email of two or three short paragraphs with one low-friction
+For composition, use only the selected family/application. Write a subject and
+a professional email of two or three short paragraphs with one low-friction
 call to action. Ground project details in the lead and use retrieved chunks as
 optional product and positioning context. Do not invent project facts. Return the
 selected canonical IDs with the email so the workflow can verify the match.

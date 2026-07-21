@@ -1,4 +1,4 @@
-"""Simplified three-node LangGraph workflow for one Accoya email."""
+"""Three-node LangGraph workflow for one Accoya nurturing email."""
 
 from __future__ import annotations
 
@@ -115,6 +115,7 @@ class AccoyaEmailAgent:
         initial: AgentState = {
             "original_lead": deepcopy(dict(complete_lead_record)),
             "strategy_chunks": [],
+            "nurturing_chunks": [],
             "warnings": [],
             "error": None,
             "telemetry": GenerationTelemetry(
@@ -192,49 +193,66 @@ class AccoyaEmailAgent:
         selection = state["selection"]
         chunks: list[StrategyChunk] = []
         nurturing_chunks: list[StrategyChunk] = []
-        nurturing_route = _fallback_nurturing_route(state["normalized_lead"])
-        if selection.selection_status is SelectionStatus.SELECTED:
-            query = selection.retrieval_query
-            telemetry = telemetry.model_copy(update={"retrieval_query": query})
-            if self._retriever is None:
-                warnings.append(
-                    "Knowledge Base is not configured; generating without KB context."
-                )
-            else:
-                try:
-                    chunks = self._retriever.retrieve(query, top_k=self._top_k)
-                    if not chunks:
-                        warnings.append(
-                            "Knowledge Base returned no results; generating without KB context."
-                        )
-                except Exception:
-                    warnings.append(
-                        "Knowledge Base retrieval failed; generating without KB context."
-                    )
 
+        if (
+            state.get("error") is not None
+            or selection.selection_status is SelectionStatus.LOW_CONFIDENCE
+        ):
+            telemetry = record_node_timing(
+                telemetry, "retrieve_strategy", started_ms
+            )
+            return {
+                "strategy_chunks": chunks,
+                "nurturing_chunks": nurturing_chunks,
+                "warnings": warnings,
+                "telemetry": telemetry,
+            }
+
+        nurturing_route = _fallback_nurturing_route(state["normalized_lead"])
+        query = selection.retrieval_query
+        telemetry = telemetry.model_copy(update={"retrieval_query": query})
+        if self._retriever is None:
+            warnings.append(
+                "Knowledge Base is not configured; generating without KB context."
+            )
+        else:
             try:
-                route_invocation = self._model.invoke_structured(
-                    NurturingRoute,
-                    system_prompt=SYSTEM_PROMPT,
-                    user_prompt=build_nurturing_route_prompt(
-                        state["normalized_lead"],
-                        selection,
-                    ),
-                    temperature=0.1,
-                )
-                telemetry = add_usage(telemetry, route_invocation.usage)
-                nurturing_route = route_invocation.value
+                chunks = self._retriever.retrieve(query, top_k=self._top_k)
+                if not chunks:
+                    warnings.append(
+                        "Knowledge Base returned no results; generating without KB context."
+                    )
             except Exception:
-                telemetry = _record_failed_model_call(telemetry)
                 warnings.append(
-                    "Nurturing route selection failed; using deterministic fallback route."
+                    "Knowledge Base retrieval failed; generating without KB context."
                 )
+
+        try:
+            route_invocation = self._model.invoke_structured(
+                NurturingRoute,
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=build_nurturing_route_prompt(
+                    state["normalized_lead"],
+                    selection,
+                ),
+                temperature=0.1,
+            )
+            telemetry = add_usage(telemetry, route_invocation.usage)
+            nurturing_route = route_invocation.value
+        except Exception:
+            telemetry = _record_failed_model_call(telemetry)
+            warnings.append(
+                "Nurturing route selection failed; using deterministic fallback route."
+            )
 
         nurturing_route = nurturing_route.model_copy(
-            update={"retrieval_query": _nurturing_template_query(nurturing_route.email_number)}
+            update={
+                "retrieval_query": _nurturing_template_query(
+                    nurturing_route.email_number
+                )
+            }
         )
-        
-        # Retrieve lead nurturing campaign guidelines (cached with ephemeral caching)
+
         if self._retriever is None:
             warnings.append(
                 "Nurturing Knowledge Base is not configured; generating without nurturing KB context."
@@ -243,7 +261,7 @@ class AccoyaEmailAgent:
             try:
                 nurturing_chunks = self._retriever.retrieve(
                     nurturing_route.retrieval_query,
-                    top_k=5
+                    top_k=self._top_k,
                 )
                 if not nurturing_chunks:
                     warnings.append(
@@ -253,11 +271,14 @@ class AccoyaEmailAgent:
                 warnings.append(
                     "Nurturing template retrieval failed; generating without nurturing KB context."
                 )
-        
+
+        all_chunks = [*chunks, *nurturing_chunks]
         telemetry = telemetry.model_copy(
             update={
-                "retrieval_count": len(chunks),
-                "retrieved_document_ids": [chunk.document_id for chunk in chunks],
+                "retrieval_count": len(all_chunks),
+                "retrieved_document_ids": [
+                    chunk.document_id for chunk in all_chunks
+                ],
             }
         )
         telemetry = record_node_timing(telemetry, "retrieve_strategy", started_ms)
@@ -481,7 +502,11 @@ def _catalog_retrieval_query(lead: NormalizedLead, hint: RoutingHint) -> str:
         lead.timing,
         lead.next_step,
     ]
-    cleaned_terms = [term.strip() for term in lead_terms if isinstance(term, str) and term.strip()]
+    cleaned_terms = [
+        term.strip()
+        for term in lead_terms
+        if isinstance(term, str) and term.strip()
+    ]
     base = " ".join(cleaned_terms[:3]) if cleaned_terms else ""
     return (
         f"{hint.product_family} {hint.application} "

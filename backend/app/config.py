@@ -17,7 +17,9 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
 
     # Database
-    database_url: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/ai_marketing"
+    database_url: str = (
+        "postgresql+psycopg2://postgres:postgres@localhost:5433/accoya_agent"
+    )
 
     # AWS
     aws_region: str = "us-east-1"

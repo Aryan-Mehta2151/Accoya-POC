@@ -14,28 +14,34 @@ handles contact data and can call live, billable, or mutating external services.
 
 The application ingests construction opportunities from an EarlyBid CSV feed,
 stores them as leads, uploads marketing strategy documents to S3, retrieves
-strategy context through an AWS Bedrock Knowledge Base, generates outreach
-emails with Gemini, supports a human-review status workflow, and exposes a
-knowledge-base chatbot. A React SPA provides Leads, Strategy Docs, Email
-Approval, and Chatbot tabs.
+strategy and nurturing context through an AWS Bedrock Knowledge Base, generates
+outreach emails through a LangGraph/Gemini agent, supports a human-review status
+workflow, and exposes a knowledge-base chatbot. A React SPA provides Leads,
+Strategy Docs, Email Approval, and Chatbot tabs.
 
 The backend stack is FastAPI, Pydantic 2, synchronous SQLAlchemy 2, PostgreSQL,
-boto3, LangChain/Gemini, and httpx. The frontend is React 19, TypeScript 6,
-Vite 8, native `fetch`, and global CSS.
+boto3, LangGraph, LangChain/Gemini, and httpx. The frontend is React 19,
+TypeScript 6, Vite 8, native `fetch`, and global CSS.
 
 ## Repository map
 
-- `backend/app/main.py`: FastAPI app, local-development CORS, startup table
-  creation, health endpoint, and router registration.
+- `backend/app/main.py`: FastAPI app, local-development CORS, startup database
+  connectivity/Alembic-head validation, health endpoint, and router registration.
 - `backend/app/config.py`: cached Pydantic settings loaded from environment
-  variables and a cwd-relative `.env` file.
-- `backend/app/api/routes/`: HTTP handlers for leads, documents, emails, and
-  chat.
-- `backend/app/schemas/`: Pydantic request/response contracts for leads,
-  emails, and chat. Document and chat-history responses are currently untyped.
-- `backend/app/db/`: synchronous SQLAlchemy engine/session setup and ORM models.
+  variables and the backend-root `.env` file resolved by absolute path.
+- `backend/app/api/routes/`: HTTP handlers for leads, persisted agent runs,
+  emails, documents, chat, and development-only raw agent diagnostics.
+- `backend/app/schemas/`: Pydantic request/response contracts for leads, agent
+  runs, emails, and chat. Document and chat-history responses are currently
+  untyped.
+- `backend/app/db/`: synchronous SQLAlchemy engine/session setup, ORM models,
+  Alembic-head checks, and the idempotent database bootstrap command.
+- `backend/alembic/`: the greenfield baseline and Alembic runtime environment.
 - `backend/app/services/`: integrations and business logic for EarlyBid, S3,
-  Bedrock, Gemini, email generation, and RAG.
+  Bedrock, Gemini, email-agent integration, and RAG.
+- `backend/agent/`: standalone synchronous Accoya email agent, including
+  normalization, catalog routing, Gemini stages, Bedrock retrieval, telemetry,
+  and offline unit tests.
 - `frontend/src/App.tsx`: in-memory tab shell; there is no client-side router.
 - `frontend/src/pages/`: hook-based page components, one per main feature.
 - `frontend/src/api.ts`: all browser API calls and `VITE_API_BASE_URL` handling.
@@ -46,16 +52,18 @@ Vite 8, native `fetch`, and global CSS.
 - `frontend/README.md`: unchanged Vite template documentation; it is not a
   project guide.
 
-There is no root task runner, Docker setup, test suite, CI workflow, Python
-lint/type-check configuration, or configured Alembic environment.
+There is no root task runner, Docker setup, CI workflow, or Python
+lint/type-check configuration. Backend tests use unittest; routine tests are
+offline, with a separate opt-in PostgreSQL integration suite.
 
 ## Local setup and commands
 
 ### Backend
 
 Python 3.11 or newer is required by the pinned pandas 3.x dependency. Run
-backend commands from `backend/`; the `app.*` imports and `.env` lookup depend
-on that working directory.
+backend commands from `backend/`; the `app.*` imports and documented command
+paths depend on that working directory. Configuration resolves `.env` from the
+backend root independently of the current directory.
 
 ```powershell
 cd backend
@@ -63,15 +71,18 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
-# Fill in .env, and make sure its PostgreSQL database already exists.
+# Set credentials and provider configuration. Example local database URL:
+# postgresql+psycopg2://postgres:YOUR_PASSWORD@localhost:5433/accoya_agent
+python -m app.db.bootstrap
 python -m uvicorn app.main:app --reload
 ```
 
 The default server is `http://localhost:8000`, OpenAPI is at `/docs`, health is
 at `/health`, and application routes use `API_PREFIX` (default `/api`). Startup
-calls `Base.metadata.create_all()`, so it requires a reachable database and can
-create tables. The repository does not provision PostgreSQL or create the
-database itself.
+checks connectivity and requires the configured database to be at the current
+Alembic head; it never creates or upgrades tables. `python -m app.db.bootstrap`
+creates the configured PostgreSQL database when absent and idempotently applies
+all migrations. Run it after changing `DATABASE_URL` or pulling a migration.
 
 ### Frontend
 
@@ -95,12 +106,12 @@ any other tracked file.
 
 | Area | Variables | Important behavior |
 | --- | --- | --- |
-| App | `APP_ENV`, `API_PREFIX` | `APP_ENV` is currently unused. `/health` is not under the prefix. |
-| Database | `DATABASE_URL` | Defaults to local PostgreSQL database `ai_marketing`; no SQLite fallback. |
+| App | `APP_ENV`, `API_PREFIX` | `/api/agent/*` is registered only when `APP_ENV=development`. `/health` is not under the prefix. |
+| Database | `DATABASE_URL` | Example/default targets `accoya_agent` on local port 5433. Runtime has no SQLite fallback; bootstrap creates the database and migrates it. |
 | AWS | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Blank keys let boto3 use its normal credential chain/IAM role. Code defaults to `us-east-1`, while `.env.example` says `us-east-2`. |
 | S3 | `S3_BUCKET_STRATEGY_DOCS` | Required for document list/upload/delete. |
 | Bedrock KB | `BEDROCK_KB_ID`, `BEDROCK_KB_MODEL_ARN`, `BEDROCK_KB_TOP_K` | The model setting accepts a model ID or full ARN. |
-| Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL` | Used by email generation; the active chat route does not use Gemini. |
+| Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL` | Used by the three email-agent model stages; the active chat route does not use Gemini. |
 | EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Sync uses Bearer auth and the configured reseller/client feed. |
 | Frontend | `VITE_API_BASE_URL` | Optional; include `/api` unless `API_PREFIX` was changed. |
 
@@ -111,18 +122,34 @@ module scope. Restart the backend after changing environment values.
 
 - Leads: `POST /api/leads/sync` fetches
   `/v1/feeds/{reseller}/{client}/latest.csv`; `POST /api/leads/upload-csv`
-  accepts the same schema. Both upsert on the feed's case-sensitive `id` column,
-  which maps to unique `Lead.external_id`. `GET /api/leads` sorts by descending
-  score. CSV headers are exact/case-sensitive, missing IDs are skipped, invalid
-  scores become `None`, and only the first email-looking contact is extracted.
+  accepts the same schema. Both pass rows through the standalone agent
+  normalizer and upsert the current projection on `(source_system,
+  external_id)`. The feed's stable `id` becomes `external_id`; normalized
+  `next_step`, decimal score, best recipient, and tags are persisted. Tags and
+  the detached complete source row use JSONB. `GET /api/leads` sorts by
+  descending score.
 - Documents: upload reads the entire file, stores it under a UUID-prefixed S3
   key, then records metadata in PostgreSQL. Listing uses S3, not the metadata
   table, as its source of truth. Deletion removes the S3 object and performs
   best-effort metadata cleanup. There is no size/type validation.
-- Emails: generation retrieves Bedrock KB chunks, prompts Gemini, parses a
-  `SUBJECT`/`BODY` response, and creates an email in `pending_review`. The enum is
-  `draft`, `pending_review`, `approved`, `sent`, or `rejected`. The frontend
-  suggests allowed transitions, but the backend accepts any enum transition.
+- Agent runs: `POST /api/agent-runs` synchronously creates and commits a
+  `running` record before provider work, then finalizes it as `generated`,
+  `insufficient_context`, `provider_error`, or `system_error`. `GET
+  /api/agent-runs` supports lead/status filters and descending cursor
+  pagination; `GET /api/agent-runs/{run_id}` reads one safe outcome; `POST
+  /api/agent-runs/{run_id}/retry` creates a linked run from the lead's current
+  projection. Terminal outcomes retain only the input hash, safe selection and
+  error fields, original draft, code versions, and aggregate telemetry.
+- Emails: `POST /api/emails/generate/{lead_id}` is the compatibility facade over
+  persisted agent runs. Generated outcomes create a mutable email in
+  `pending_review`; insufficient context returns 422 and provider failure 502.
+  Failures retain the run but create no email. A generated run's original draft
+  remains immutable while subject/body edits affect the review email and each
+  status transition appends an `email_status_events` row. The status enum is
+  `draft`, `pending_review`, `approved`, `sent`, or `rejected`.
+- Agent diagnostics: `/api/agent/*` accepts raw lead mappings and can expose
+  detailed results, retrieval references, and traces. It is registered only in
+  development and is not part of the production API surface.
 - Chat: `POST /api/chat` uses Bedrock `RetrieveAndGenerate` directly, persists
   user and assistant messages, returns Bedrock citations, and retries once
   without a stale Bedrock session ID. `GET /api/chat/{session_id}` returns stored
@@ -144,12 +171,14 @@ module scope. Restart the backend after changing environment values.
 - Translate expected integration failures into useful HTTP errors without
   exposing credentials. The existing convention generally uses 502 for an
   upstream failure and 404 for a missing local record.
-- `Base.metadata.create_all()` does not modify existing columns. Any ORM schema
-  change needs deliberate migration handling; installing Alembic alone is not a
-  migration strategy.
-- If lead ingestion changes, keep the EarlyBid column map, sync path, upload
-  path, ORM model, Pydantic schema, and frontend type aligned. Note that
-  `routes/leads.py` currently calls the private `_row_to_fields()` helper.
+- Never restore `Base.metadata.create_all()` to application startup. Any ORM
+  schema change requires an Alembic revision; keep the migration and ORM
+  metadata aligned, then run `python -m app.db.bootstrap`.
+- The existing baseline is intentionally greenfield. Do not infer authorization
+  to import or mutate a legacy database.
+- If lead ingestion changes, keep agent normalization, sync/upload paths, the
+  composite source identity, ORM model, Pydantic schema, JSONB representation,
+  and frontend wire type aligned.
 
 ### Frontend
 
@@ -179,18 +208,32 @@ module scope. Restart the backend after changing environment values.
 Run the checks relevant to the changed area from the indicated directory.
 
 ```powershell
-# backend/ - syntax-only check; no backend test/lint suite exists yet
-python -m compileall -q app
+# backend/
+python -m compileall -q app agent alembic
+python -m unittest discover -s agent/tests -t . -p "test_*.py"
+python -m unittest discover -s tests -v
 
 # frontend/
 npm run lint
 npm run build
 ```
 
-For API smoke testing, start a deliberately configured local backend and check
-`/health` and `/docs`. Starting it touches the configured database. New backend
-tests should use an isolated database and mock EarlyBid, S3, Bedrock, and Gemini;
-routine verification must not call live services. If tests or new tooling are
+The PostgreSQL suite is explicitly opt-in and requires a dedicated database
+whose name ends in `_test`:
+
+```powershell
+# backend/; never point this at accoya_agent or another non-test database.
+$env:ACCOYA_TEST_DATABASE_URL="postgresql+psycopg2://postgres:YOUR_PASSWORD@localhost:5433/accoya_agent_test"
+python -m unittest tests.test_postgres_agent_database -v
+Remove-Item Env:ACCOYA_TEST_DATABASE_URL
+```
+
+It provisions/migrates the test database and cleans only its agent-subsystem
+rows. For API smoke testing, start a deliberately configured local backend and
+check `/health` and `/docs`; startup connects to PostgreSQL and validates its
+Alembic revision but does not change schema. Routine backend tests use isolated
+state and fake the email agent or providers; they must not call EarlyBid, S3,
+Bedrock, Gemini, email services, or live PostgreSQL. If tests or new tooling are
 added, document the exact command here and in the relevant README.
 
 ## Safety and known gaps
@@ -207,9 +250,6 @@ added, document the exact command here and in the relevant README.
 - Document upload does not trigger a Bedrock KB ingestion job.
 - Email status changes do not send mail, and `sent` emails are not indexed into
   the KB. The UI's "Send to client" action only changes the status.
-- The configured Gemini 1.5 Pro default was shut down in September 2025.
-- Scheduled feed sync, Alembic migrations, and AWS deployment are not
-  implemented.
-- The root README's "frontend coming next" statement is stale. Its chat diagram
-  also describes Bedrock retrieval followed by Gemini, while the active chat
-  endpoint uses Bedrock `RetrieveAndGenerate`.
+- Scheduled feed sync and AWS deployment remain out of scope. Alembic is
+  configured with a clean baseline; legacy import/backfill is out of scope.
+- Production database roles and credential management are not implemented.

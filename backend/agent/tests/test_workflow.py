@@ -10,11 +10,13 @@ from agent.integrations import ModelInvocationError, StructuredInvocation
 from agent.models import (
     EmailDraft,
     GenerationStatus,
+    NurturingRoute,
     ProductSelection,
     SelectionStatus,
     StrategyChunk,
     TokenUsage,
 )
+from agent.observability import log_result
 from agent.workflow import AccoyaEmailAgent
 
 
@@ -67,6 +69,17 @@ def draft(**updates):
     return EmailDraft(**data)
 
 
+def nurturing_route(**updates):
+    data = {
+        "email_number": 4,
+        "theme": "Partnership and support",
+        "retrieval_query": "model-proposed template query",
+        "rationale": "The lead is moving toward commitment.",
+    }
+    data.update(updates)
+    return NurturingRoute(**data)
+
+
 def chunk(document_id="doc-1", metadata=None):
     return StrategyChunk(
         document_id=document_id,
@@ -113,16 +126,24 @@ class FakeStructuredModel:
 
 
 class FakeRetriever:
-    def __init__(self, chunks=(), error=None, events=None):
+    def __init__(self, chunks=(), error=None, events=None, responses=None):
         self.chunks = list(chunks)
         self.error = error
         self.events = events
+        self.responses = list(responses) if responses is not None else None
         self.calls = []
 
     def retrieve(self, query, *, top_k=5):
         self.calls.append({"query": query, "top_k": top_k})
         if self.events is not None:
             self.events.append("retrieve")
+        if self.responses is not None:
+            if not self.responses:
+                raise AssertionError("Unexpected retrieval call")
+            response = self.responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return list(response)
         if self.error:
             raise self.error
         return list(self.chunks)
@@ -138,26 +159,57 @@ def make_agent(model, retriever=None, **kwargs):
 
 
 class WorkflowTests(unittest.TestCase):
-    def test_graph_order_two_model_calls_and_raw_chunk_propagation(self):
+    def test_successful_nurturing_order_top_k_and_combined_telemetry(self):
         events = []
         model = FakeStructuredModel(
-            [(ProductSelection, selection()), (EmailDraft, draft())], events
+            [
+                (ProductSelection, selection()),
+                (NurturingRoute, nurturing_route()),
+                (EmailDraft, draft()),
+            ],
+            events,
         )
-        raw_chunks = [chunk("draft-doc"), chunk("no-meta", {})]
-        retriever = FakeRetriever(raw_chunks, events=events)
+        strategy_chunks = [chunk("strategy-1"), chunk("strategy-2", {})]
+        nurturing_chunks = [chunk("nurturing-1")]
+        retriever = FakeRetriever(
+            events=events,
+            responses=[strategy_chunks, nurturing_chunks],
+        )
 
         result = make_agent(model, retriever, top_k=7).generate(lead_record())
 
         self.assertEqual(result.status, GenerationStatus.GENERATED)
         self.assertEqual(
             events,
-            ["model:ProductSelection", "retrieve", "model:EmailDraft"],
+            [
+                "model:ProductSelection",
+                "retrieve",
+                "model:NurturingRoute",
+                "retrieve",
+                "model:EmailDraft",
+            ],
         )
-        self.assertEqual(len(model.calls), 2)
-        self.assertEqual(retriever.calls[0]["top_k"], 7)
-        self.assertEqual(result.strategy_references, raw_chunks)
-        self.assertEqual(result.telemetry.model_calls, 2)
-        self.assertEqual(result.telemetry.retrieval_count, 2)
+        self.assertEqual(len(model.calls), 3)
+        self.assertEqual(
+            [call["top_k"] for call in retriever.calls],
+            [7, 7],
+        )
+        self.assertEqual(
+            retriever.calls[0]["query"], selection().retrieval_query
+        )
+        self.assertIn("EMAIL 4", retriever.calls[1]["query"])
+        self.assertNotEqual(
+            retriever.calls[1]["query"], nurturing_route().retrieval_query
+        )
+        self.assertEqual(result.strategy_references, strategy_chunks)
+        self.assertEqual(result.nurturing_email_number, 4)
+        self.assertEqual(result.nurturing_email_theme, "Partnership and support")
+        self.assertEqual(result.telemetry.model_calls, 3)
+        self.assertEqual(result.telemetry.retrieval_count, 3)
+        self.assertEqual(
+            result.telemetry.retrieved_document_ids,
+            ["strategy-1", "strategy-2", "nurturing-1"],
+        )
         self.assertEqual(
             set(result.telemetry.node_timings_ms),
             {"analyze_lead", "retrieve_strategy", "compose_email"},
@@ -170,7 +222,11 @@ class WorkflowTests(unittest.TestCase):
             selected_application="decking",
         )
         model = FakeStructuredModel(
-            [(ProductSelection, alias), (EmailDraft, draft())]
+            [
+                (ProductSelection, alias),
+                (NurturingRoute, nurturing_route()),
+                (EmailDraft, draft()),
+            ]
         )
         result = make_agent(model).generate(lead_record())
         self.assertEqual(result.status, GenerationStatus.GENERATED)
@@ -194,6 +250,8 @@ class WorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(retriever.calls, [])
                 self.assertEqual(len(model.calls), 1)
+                self.assertIsNone(result.nurturing_email_number)
+                self.assertEqual(result.telemetry.retrieval_count, 0)
 
     def test_missing_empty_or_failed_retrieval_still_generates(self):
         scenarios = (
@@ -204,7 +262,11 @@ class WorkflowTests(unittest.TestCase):
         for retriever, warning in scenarios:
             with self.subTest(warning=warning):
                 model = FakeStructuredModel(
-                    [(ProductSelection, selection()), (EmailDraft, draft())]
+                    [
+                        (ProductSelection, selection()),
+                        (NurturingRoute, nurturing_route()),
+                        (EmailDraft, draft()),
+                    ]
                 )
                 result = make_agent(model, retriever).generate(lead_record())
                 self.assertEqual(result.status, GenerationStatus.GENERATED)
@@ -216,6 +278,7 @@ class WorkflowTests(unittest.TestCase):
     def test_draft_pair_mismatch_is_provider_error_without_retry(self):
         model = FakeStructuredModel([
             (ProductSelection, selection()),
+            (NurturingRoute, nurturing_route()),
             (EmailDraft, draft(selected_application="pool_decking")),
         ])
         raw_chunks = [chunk()]
@@ -223,22 +286,46 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, GenerationStatus.PROVIDER_ERROR)
         self.assertIsNone(result.subject)
         self.assertEqual(result.strategy_references, raw_chunks)
-        self.assertEqual(len(model.calls), 2)
-        self.assertEqual(result.telemetry.model_calls, 2)
+        self.assertEqual(len(model.calls), 3)
+        self.assertEqual(result.telemetry.model_calls, 3)
         self.assertTrue(any("mismatched" in item for item in result.warnings))
 
-    def test_analysis_and_composition_provider_failures_are_safe(self):
+    def test_terminal_analysis_failure_skips_all_later_external_work(self):
         analysis_model = FakeStructuredModel([
             (ProductSelection, ModelInvocationError("analysis unavailable"))
         ])
-        analysis = make_agent(analysis_model, FakeRetriever([chunk()])).generate(
-            lead_record()
+        retriever = FakeRetriever([chunk()])
+        analysis = make_agent(analysis_model, retriever).generate(
+            {"id": "unroutable-lead"}
         )
         self.assertEqual(analysis.status, GenerationStatus.PROVIDER_ERROR)
         self.assertEqual(analysis.telemetry.model_calls, 1)
+        self.assertEqual(analysis.telemetry.retrieval_count, 0)
+        self.assertEqual(retriever.calls, [])
+        self.assertEqual(len(analysis_model.calls), 1)
+        self.assertIsNone(analysis.nurturing_email_number)
 
+    def test_analysis_provider_failure_with_hint_uses_fallback_selection(self):
+        model = FakeStructuredModel([
+            (ProductSelection, ModelInvocationError("analysis unavailable")),
+            (NurturingRoute, nurturing_route()),
+            (EmailDraft, draft()),
+        ])
+        retriever = FakeRetriever(responses=[[chunk("strategy")], []])
+
+        result = make_agent(model, retriever).generate(lead_record())
+
+        self.assertEqual(result.status, GenerationStatus.GENERATED)
+        self.assertEqual(len(model.calls), 3)
+        self.assertEqual(len(retriever.calls), 2)
+        self.assertTrue(
+            any("deterministic routing fallback" in item for item in result.warnings)
+        )
+
+    def test_composition_provider_failure_is_safe(self):
         compose_model = FakeStructuredModel([
             (ProductSelection, selection()),
+            (NurturingRoute, nurturing_route()),
             (EmailDraft, ModelInvocationError("composition unavailable")),
         ])
         composition = make_agent(compose_model, FakeRetriever([chunk()])).generate(
@@ -246,14 +333,105 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertEqual(composition.status, GenerationStatus.PROVIDER_ERROR)
         self.assertIsNone(composition.body)
-        self.assertEqual(composition.telemetry.model_calls, 2)
+        self.assertEqual(composition.telemetry.model_calls, 3)
+
+    def test_nurturing_route_failure_uses_stage_fallback(self):
+        model = FakeStructuredModel([
+            (ProductSelection, selection()),
+            (NurturingRoute, ModelInvocationError("route unavailable")),
+            (EmailDraft, draft()),
+        ])
+        retriever = FakeRetriever(
+            responses=[[chunk("strategy")], [chunk("nurturing")]]
+        )
+
+        result = make_agent(model, retriever).generate(lead_record())
+
+        self.assertEqual(result.status, GenerationStatus.GENERATED)
+        self.assertEqual(result.nurturing_email_number, 1)
+        self.assertIn("EMAIL 1", result.nurturing_kb_query)
+        self.assertIn("EMAIL 1", retriever.calls[1]["query"])
+        self.assertEqual(result.telemetry.model_calls, 3)
+        self.assertTrue(
+            any("fallback route" in item for item in result.warnings)
+        )
+
+    def test_each_retrieval_failure_is_independently_nonterminal(self):
+        scenarios = (
+            (
+                [RuntimeError("strategy denied"), [chunk("nurturing")]],
+                "Knowledge Base retrieval failed",
+                ["nurturing"],
+            ),
+            (
+                [[chunk("strategy")], RuntimeError("nurturing denied")],
+                "Nurturing template retrieval failed",
+                ["strategy"],
+            ),
+        )
+        for responses, warning, expected_ids in scenarios:
+            with self.subTest(warning=warning):
+                model = FakeStructuredModel([
+                    (ProductSelection, selection()),
+                    (NurturingRoute, nurturing_route()),
+                    (EmailDraft, draft()),
+                ])
+                result = make_agent(
+                    model, FakeRetriever(responses=responses)
+                ).generate(lead_record())
+                self.assertEqual(result.status, GenerationStatus.GENERATED)
+                self.assertEqual(
+                    result.telemetry.retrieved_document_ids, expected_ids
+                )
+                self.assertEqual(result.telemetry.retrieval_count, 1)
+                self.assertTrue(any(warning in item for item in result.warnings))
+
+    def test_subject_has_no_agent_length_limit(self):
+        long_subject = "S" * 5000
+        model = FakeStructuredModel([
+            (ProductSelection, selection()),
+            (NurturingRoute, nurturing_route()),
+            (EmailDraft, draft(subject=long_subject)),
+        ])
+
+        result = make_agent(model).generate(lead_record())
+
+        self.assertEqual(result.status, GenerationStatus.GENERATED)
+        self.assertEqual(result.subject, long_subject)
+
+    def test_structured_log_omits_lead_derived_and_email_content(self):
+        model = FakeStructuredModel([
+            (ProductSelection, selection()),
+            (NurturingRoute, nurturing_route()),
+            (EmailDraft, draft()),
+        ])
+        result = make_agent(model).generate(lead_record())
+
+        with patch("agent.observability.logger.info") as log_info:
+            log_result(result)
+
+        extra = log_info.call_args.kwargs["extra"]
+        self.assertEqual(extra["generation_status"], "generated")
+        self.assertEqual(extra["nurturing_email_number"], 4)
+        for forbidden in (
+            "retrieval_query",
+            "original_lead",
+            "subject",
+            "body",
+            "chunk_text",
+        ):
+            self.assertNotIn(forbidden, extra)
 
     def test_original_record_is_deeply_preserved(self):
         record = lead_record()
         record["nested"] = {"values": [1, 2]}
         expected = deepcopy(record)
         model = FakeStructuredModel(
-            [(ProductSelection, selection()), (EmailDraft, draft())]
+            [
+                (ProductSelection, selection()),
+                (NurturingRoute, nurturing_route()),
+                (EmailDraft, draft()),
+            ]
         )
         result = make_agent(model).generate(record)
         record["nested"]["values"].append(3)
@@ -266,9 +444,12 @@ class WorkflowTests(unittest.TestCase):
             gemini_model="configured-model",
             bedrock_kb_id="",
         )
-        result = AccoyaEmailAgent.from_settings(settings).generate(lead_record())
+        result = AccoyaEmailAgent.from_settings(settings).generate(
+            {"id": "unroutable-lead"}
+        )
         self.assertEqual(result.status, GenerationStatus.PROVIDER_ERROR)
         self.assertEqual(result.telemetry.model_name, "configured-model")
+        self.assertEqual(result.telemetry.model_calls, 1)
 
     def test_from_settings_bedrock_construction_failure_is_fallback(self):
         settings = Settings(
@@ -278,7 +459,11 @@ class WorkflowTests(unittest.TestCase):
             bedrock_kb_id="kb",
         )
         model = FakeStructuredModel(
-            [(ProductSelection, selection()), (EmailDraft, draft())]
+            [
+                (ProductSelection, selection()),
+                (NurturingRoute, nurturing_route()),
+                (EmailDraft, draft()),
+            ]
         )
         with patch(
             "agent.workflow.GeminiStructuredModel.from_settings",

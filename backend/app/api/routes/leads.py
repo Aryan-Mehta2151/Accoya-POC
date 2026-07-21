@@ -47,21 +47,11 @@ async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)
     text = (await file.read()).decode("utf-8-sig")
     rows = lead_feed_service.parse_feed_csv(text)
 
-    touched: list[Lead] = []
-    for row in rows:
-        external_id = row.get("id")
-        if not external_id:
-            continue
-        fields = lead_feed_service._row_to_fields(row, f"upload:{file.filename}")
-        existing = db.scalar(select(Lead).where(Lead.external_id == external_id))
-        if existing:
-            for attr, value in fields.items():
-                setattr(existing, attr, value)
-            touched.append(existing)
-        else:
-            lead = Lead(**fields)
-            db.add(lead)
-            touched.append(lead)
+    touched, _, _ = lead_feed_service.upsert_feed_rows(
+        db,
+        rows,
+        source_feed=f"upload:{file.filename}",
+    )
 
     db.commit()
     for lead in touched:

@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from agent import AccoyaEmailAgent
 from agent.models import GenerationResult, GenerationTelemetry
@@ -16,17 +16,20 @@ from app.schemas.agent import (
     AgentRoutingResponse,
     AgentTraceResponse,
 )
+from app.services.email_generator import get_accoya_email_agent
 
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 
 @router.post("/generate", response_model=GenerationResult)
-def generate_with_agent(payload: AgentGenerateRequest) -> GenerationResult:
+def generate_with_agent(
+    payload: AgentGenerateRequest,
+    email_agent: AccoyaEmailAgent = Depends(get_accoya_email_agent),
+) -> GenerationResult:
     """Run the isolated agent workflow for one raw lead record."""
     try:
-        agent = AccoyaEmailAgent.from_settings()
-        return agent.generate(payload.lead)
+        return email_agent.generate(payload.lead)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except TypeError as exc:
@@ -61,31 +64,25 @@ def get_agent_routing_hints(payload: AgentGenerateRequest) -> AgentRoutingRespon
 
 
 @router.post("/trace", response_model=AgentTraceResponse)
-def trace_agent_steps(payload: AgentGenerateRequest) -> AgentTraceResponse:
-    """Run all workflow steps and return each stage output for debugging."""
+def trace_agent_steps(
+    payload: AgentGenerateRequest,
+    email_agent: AccoyaEmailAgent = Depends(get_accoya_email_agent),
+) -> AgentTraceResponse:
+    """Run the workflow and return available stage output for debugging."""
     try:
-        agent = AccoyaEmailAgent.from_settings()
         started_ms = monotonic_ms()
 
-        state = {
+        initial_state = {
             "original_lead": deepcopy(dict(payload.lead)),
             "strategy_chunks": [],
             "warnings": [],
             "error": None,
             "telemetry": GenerationTelemetry(
-                model_name=agent._model.model_name,
+                model_name=email_agent._model.model_name,
                 prompt_version=PROMPT_VERSION,
             ),
         }
-
-        analyze_update = agent._analyze_lead(state)
-        state.update(analyze_update)
-
-        retrieve_update = agent._retrieve_strategy(state)
-        state.update(retrieve_update)
-
-        compose_update = agent._compose_email(state)
-        state.update(compose_update)
+        state = email_agent.graph.invoke(initial_state)
 
         result = state.get("result")
         if result is None:
@@ -98,7 +95,7 @@ def trace_agent_steps(payload: AgentGenerateRequest) -> AgentTraceResponse:
             normalized_lead=state["normalized_lead"],
             routing_hints=state["routing_hints"],
             selection=state["selection"],
-            nurturing_route=state["nurturing_route"],
+            nurturing_route=state.get("nurturing_route"),
             strategy_chunks=state.get("strategy_chunks", []),
             nurturing_chunks=state.get("nurturing_chunks", []),
             warnings=state.get("warnings", []),
