@@ -5,7 +5,12 @@ from __future__ import annotations
 from datetime import date
 import unittest
 
-from agent.normalization import determine_audience, determine_stage, normalize_lead
+from agent.normalization import (
+    EARLYBID_NATURAL_ID_PREFIX,
+    determine_audience,
+    determine_stage,
+    normalize_lead,
+)
 
 
 class NormalizeLeadTests(unittest.TestCase):
@@ -23,7 +28,103 @@ class NormalizeLeadTests(unittest.TestCase):
             with self.subTest(display_id=display_id), self.assertRaisesRegex(
                 ValueError, "display rank"
             ):
-                normalize_lead({"id": display_id})
+                normalize_lead(
+                    {"id": display_id}, identity_scope="reseller/client"
+                )
+
+    def test_derives_deterministic_id_from_canonical_natural_key(self):
+        first = normalize_lead(
+            {
+                "Project": " Caf\u00e9\u00a0Pavilion ",
+                "Location": " Portland, Oregon ",
+            },
+            identity_scope=" AMPED/Accoya ",
+        )
+        equivalent = normalize_lead(
+            {
+                "Project": "CAFE\u0301   PAVILION",
+                "Location": "portland",
+                "State": "or",
+            },
+            identity_scope="amped/accoya",
+        )
+
+        self.assertEqual(first.lead_id, equivalent.lead_id)
+        self.assertTrue(first.lead_id.startswith(EARLYBID_NATURAL_ID_PREFIX))
+        digest = first.lead_id.removeprefix(EARLYBID_NATURAL_ID_PREFIX)
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_natural_id_ignores_mutable_fields_but_is_scoped(self):
+        natural_key = {
+            "Project": "Riverside Walkway",
+            "Location": "Sacramento, California",
+        }
+        initial = normalize_lead(
+            {
+                **natural_key,
+                "Score": "72",
+                "URL": "https://example.test/old",
+                "Next Step": "Call the architect",
+                "Contacts": "Pat One, pat@example.test",
+            },
+            identity_scope="reseller/client-a",
+        )
+        refreshed = normalize_lead(
+            {
+                **natural_key,
+                "Score": "99",
+                "URL": "https://example.test/new",
+                "Next Step": "Send samples",
+                "Contacts": "A different contact",
+            },
+            identity_scope="reseller/client-a",
+        )
+        other_feed = normalize_lead(
+            natural_key,
+            identity_scope="reseller/client-b",
+        )
+
+        self.assertEqual(initial.lead_id, refreshed.lead_id)
+        self.assertNotEqual(initial.lead_id, other_feed.lead_id)
+
+    def test_explicit_id_precedes_natural_identity(self):
+        lead = normalize_lead(
+            {"lead_id": "provided-42"},
+            identity_scope="reseller/client",
+        )
+
+        self.assertEqual(lead.lead_id, "provided-42")
+
+    def test_natural_identity_requires_nonblank_scope_project_and_location(self):
+        cases = (
+            ({"Project": "Library", "Location": "Boston, MA"}, " ", "identity_scope"),
+            ({"Location": "Boston, MA"}, "reseller/client", "Project"),
+            ({"Project": "Library"}, "reseller/client", "Location"),
+        )
+        for record, scope, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                normalize_lead(record, identity_scope=scope)
+
+    def test_natural_identity_does_not_mutate_or_augment_source_mapping(self):
+        source = {
+            "Project": "Garden Room",
+            "Location": "Seattle, WA",
+            "Tags": ["Exterior", "Wood"],
+        }
+        expected = {
+            "Project": "Garden Room",
+            "Location": "Seattle, WA",
+            "Tags": ["Exterior", "Wood"],
+        }
+
+        lead = normalize_lead(source, identity_scope="reseller/client")
+
+        self.assertEqual(source, expected)
+        self.assertEqual(lead.source_values, expected)
+        self.assertNotIn("lead_id", lead.source_values)
+        self.assertNotIn("external_id", lead.source_values)
 
     def test_normalizes_display_aliases_contacts_date_tags_location_and_mentions(self):
         lead = normalize_lead(

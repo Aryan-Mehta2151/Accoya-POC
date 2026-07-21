@@ -138,7 +138,7 @@ directory.
 | Bedrock KB | `BEDROCK_KB_ID`, `BEDROCK_KB_TOP_K` | Used for both email-agent retrievals. |
 | Bedrock chat | `BEDROCK_KB_MODEL_ARN` | Model ID or ARN used by the separate `RetrieveAndGenerate` chatbot flow. |
 | Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL` | Used by the three structured email-agent model stages. |
-| EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Configures Bearer-authenticated feed sync. |
+| EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Configures Bearer-authenticated feed sync. The reseller/client scope is also part of the derived identity for rows without a source ID. |
 | Frontend | `VITE_API_BASE_URL` | Optional full browser API base; include `/api` unless `API_PREFIX` changes. |
 
 Settings and the configured email agent are process-cached. Restart FastAPI
@@ -185,6 +185,11 @@ data to `{}`, run status to `running`, warnings to `[]`, model/retrieval counts
 to zero, and email status to `pending_review` when those values are omitted.
 Alembic compares both column types and server defaults against ORM metadata.
 
+EarlyBid natural identity is stored in the existing unrestricted
+`leads.external_id` column and uses the existing unique `(source_system,
+external_id)` constraint. This is an ingestion-only change and requires no
+database migration.
+
 Deleting a lead cascades through its runs, generated emails, and status events;
 a retry link uses `RESTRICT` so an attempt referenced by a retry cannot be
 removed independently. Indexes cover lead score/archive queries, run
@@ -205,12 +210,28 @@ guaranteed.
 `POST /api/leads/upload-csv` accepts the same feed shape.
 
 Both paths use the standalone agent normalizer as their single interpretation
-layer. The feed's stable, case-sensitive `id` becomes `external_id`; invalid
-rows without a stable ID are skipped. The normalized projection includes
-decimal score, `next_step`, contact data and best recipient email, normalized
-tags, location, timing, signal, and the other agent inputs. Duplicate rows in
-one feed collapse to the last projection, and upserts are scoped by
-`(source_system, external_id)`.
+layer. Current EarlyBid feeds do not provide a stable row ID, so the backend
+owns identity. It derives a versioned external ID in the form
+`earlybid-natural-v1:<sha256>` from the configured reseller/client feed scope
+plus normalized `Project`, `Location`, and `State`. Explicit `external_id`,
+`lead_id`, or `id` values take precedence when present so a future feed can
+provide its own immutable identity. URL, score, timing, summary, contacts,
+tags, next step, and all other mutable fields are deliberately excluded from
+the hash.
+
+Re-importing the same opportunity updates its existing current projection on
+`(source_system, external_id)`, even when excluded mutable fields change. The
+normalized projection includes decimal score, `next_step`, contact data and
+best recipient email, normalized tags, location, timing, signal, and the other
+agent inputs. Because the source has no immutable ID, changing a project's
+name or location creates a new identity; the backend cannot reliably infer
+that the renamed or relocated row is the same opportunity.
+
+Ingestion is strict and atomic. A CSV upload with an invalid row, missing
+natural-identity component, or conflicting duplicate identity returns HTTP
+422; a remote sync with the same feed validation problem returns HTTP 502. In
+either case, no rows from that batch are written, rather than silently skipping
+or partially importing them.
 
 The full detached source row is retained in `raw_data` JSONB for the current
 projection, but email generation passes Gemini only an explicit allowlist of
@@ -326,6 +347,12 @@ npm run lint
 npm run build
 ```
 
+The offline ingestion tests cover explicit-ID precedence, deterministic
+`earlybid-natural-v1` IDs, repeat imports, mutable-field changes, scope
+separation, invalid components, duplicate conflicts, and the upload/sync
+422/502 atomic failure contracts. The supplied ten-lead EarlyBid-shaped sample
+is also exercised without contacting EarlyBid or persisting its contact data.
+
 The opt-in PostgreSQL integration suite verifies clean/idempotent bootstrap,
 native types and defaults, normalized JSONB ingestion, all run outcomes,
 running-before-provider transaction boundaries, immutable originals, long
@@ -360,5 +387,8 @@ python -m alembic check
 - Document upload does not start a Bedrock KB ingestion job.
 - There is no scheduled feed sync, Docker environment, CI workflow, or AWS
   deployment configuration.
+- EarlyBid does not supply an immutable opportunity ID. A project rename or
+  location correction therefore produces a new lead identity; reconciliation
+  of renamed opportunities is not automated.
 - The Alembic baseline is greenfield; legacy import/backfill is out of scope.
 - Production database roles and credential management are not implemented.

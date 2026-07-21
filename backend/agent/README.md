@@ -37,10 +37,40 @@ result = agent.generate(
 )
 ```
 
-`generate()` accepts current snake_case fields or CSV display headers. The
-first nonblank value from `lead_id`, `id`, or `external_id` is required;
-dashboard ranks such as `Lead #4` are rejected. The result retains an untouched
-deep copy of the supplied mapping.
+`generate()` accepts current snake_case fields or CSV display headers. Direct
+agent calls require the first nonblank value from `lead_id`, `id`, or
+`external_id`; dashboard ranks such as `Lead #4` are rejected. The result
+retains an untouched deep copy of the supplied mapping.
+
+## EarlyBid source identity
+
+EarlyBid feeds that omit stable IDs use the normalizer's keyword-only source
+scope:
+
+```python
+from agent.normalization import normalize_lead
+
+lead = normalize_lead(
+    {
+        "Project": "Riverside Walkway",
+        "Location": "Sacramento, CA",
+    },
+    identity_scope="amped/amped-accoya-materials",
+)
+```
+
+When no explicit ID is present, this produces
+`earlybid-natural-v1:<sha256>` from the canonical feed scope, project, city,
+and state. Components use Unicode NFKC normalization, collapsed whitespace,
+case folding, and canonical US state codes. Project and location are required.
+Score, timing, next step, summary, contacts, tags, meeting date, and URL do not
+participate, so ordinary feed refreshes keep the same ID. Explicit IDs always
+take precedence, and the supplied mapping is neither mutated nor augmented.
+
+The scope should remain the stable `reseller/client` pair. A project rename or
+location change produces a new identity because EarlyBid supplies no immutable
+source key. Raw agent calls without an identity scope continue to require an
+explicit ID; application ingestion owns scope selection and persistence.
 
 `GenerationResult.status` is one of:
 

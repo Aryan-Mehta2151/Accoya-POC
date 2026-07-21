@@ -112,7 +112,7 @@ any other tracked file.
 | S3 | `S3_BUCKET_STRATEGY_DOCS` | Required for document list/upload/delete. |
 | Bedrock KB | `BEDROCK_KB_ID`, `BEDROCK_KB_MODEL_ARN`, `BEDROCK_KB_TOP_K` | The model setting accepts a model ID or full ARN. |
 | Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL` | Used by the three email-agent model stages; the active chat route does not use Gemini. |
-| EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Sync uses Bearer auth and the configured reseller/client feed. |
+| EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Sync uses Bearer auth; reseller/client also scope derived natural identities. |
 | Frontend | `VITE_API_BASE_URL` | Optional; include `/api` unless `API_PREFIX` was changed. |
 
 `get_settings()` is cached, and multiple modules retain the returned object at
@@ -124,10 +124,17 @@ module scope. Restart the backend after changing environment values.
   `/v1/feeds/{reseller}/{client}/latest.csv`; `POST /api/leads/upload-csv`
   accepts the same schema. Both pass rows through the standalone agent
   normalizer and upsert the current projection on `(source_system,
-  external_id)`. The feed's stable `id` becomes `external_id`; normalized
-  `next_step`, decimal score, best recipient, and tags are persisted. Tags and
-  the detached complete source row use JSONB. `GET /api/leads` sorts by
-  descending score.
+  external_id)`. Because EarlyBid supplies no immutable row ID, the backend
+  derives `earlybid-natural-v1:<sha256>` from reseller/client scope and
+  normalized Project/Location/State. A supplied `external_id`, `lead_id`, or
+  `id` takes precedence for future compatibility. URL and all mutable fields
+  are excluded. Repeat sync updates the same projection; changing project name
+  or location creates a new identity. Invalid or conflicting batches are
+  atomic: upload returns 422 and remote sync returns 502 without partial
+  writes. Normalized `next_step`, decimal score, best recipient, and tags are
+  persisted. Tags and the detached complete source row use JSONB. `GET
+  /api/leads` sorts by descending score. This uses the existing external-ID
+  column and unique constraint, so it requires no database migration.
 - Documents: upload reads the entire file, stores it under a UUID-prefixed S3
   key, then records metadata in PostgreSQL. Listing uses S3, not the metadata
   table, as its source of truth. Deletion removes the S3 object and performs
@@ -179,6 +186,10 @@ module scope. Restart the backend after changing environment values.
 - If lead ingestion changes, keep agent normalization, sync/upload paths, the
   composite source identity, ORM model, Pydantic schema, JSONB representation,
   and frontend wire type aligned.
+- Keep `earlybid-natural-v1` deterministic and backward compatible. Do not add
+  URL, score, timing, summary, contacts, tags, next step, or other mutable feed
+  values to its hash. Identity-version changes require an explicit
+  reconciliation strategy even though they do not require a schema migration.
 
 ### Frontend
 
@@ -236,6 +247,12 @@ state and fake the email agent or providers; they must not call EarlyBid, S3,
 Bedrock, Gemini, email services, or live PostgreSQL. If tests or new tooling are
 added, document the exact command here and in the relevant README.
 
+Lead-ingestion coverage must include deterministic natural IDs for rows without
+source IDs, explicit-ID precedence, repeat sync, mutable-field changes, feed
+scope separation, missing identity components, duplicate conflicts, atomic
+uploads/syncs, and their respective HTTP 422/502 responses. Sample CSV tests
+must remain offline and must not persist or commit real contact data.
+
 ## Safety and known gaps
 
 - `.env`, virtual environments, `node_modules`, build output, logs, local
@@ -252,4 +269,7 @@ added, document the exact command here and in the relevant README.
   the KB. The UI's "Send to client" action only changes the status.
 - Scheduled feed sync and AWS deployment remain out of scope. Alembic is
   configured with a clean baseline; legacy import/backfill is out of scope.
+- EarlyBid supplies no immutable opportunity ID. Project renames or location
+  corrections produce new natural identities; automatic reconciliation is out
+  of scope.
 - Production database roles and credential management are not implemented.

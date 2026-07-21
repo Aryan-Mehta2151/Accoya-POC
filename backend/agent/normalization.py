@@ -9,9 +9,11 @@ The caller's mapping is never mutated.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime
 from typing import Any, TypeVar
@@ -53,6 +55,7 @@ _BLANK_MARKERS = {"", "n/a", "na", "none", "null", "nan", "-", "--"}
 _DISPLAY_IDENTIFIER_RE = re.compile(
     r"^lead\s*(?:#|no\.?\s*|number\s+)\d+$", re.IGNORECASE
 )
+EARLYBID_NATURAL_ID_PREFIX = "earlybid-natural-v1:"
 _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+", re.IGNORECASE)
 _PHONE_RE = re.compile(
     r"(?<!\d)(?:\+?1[\s.()-]*)?(?:\(?\d{3}\)?[\s.-]*)"
@@ -333,7 +336,15 @@ def _get_value(
     return fallback
 
 
-def _resolve_lead_id(record: Mapping[str, Any], lookup: Mapping[str, Any]) -> str:
+def _resolve_lead_id(
+    record: Mapping[str, Any],
+    lookup: Mapping[str, Any],
+    *,
+    identity_scope: str | None = None,
+    project: Any = None,
+    location: Any = None,
+    state: Any = None,
+) -> str:
     for alias in ("lead_id", "id", "external_id"):
         value = _get_value(record, lookup, alias)
         identifier = _clean_text(value)
@@ -344,6 +355,13 @@ def _resolve_lead_id(record: Mapping[str, Any], lookup: Mapping[str, Any]) -> st
                 f"{alias} is a display rank, not a stable lead identifier: {identifier!r}"
             )
         return identifier
+    if identity_scope is not None:
+        return derive_earlybid_natural_id(
+            identity_scope=identity_scope,
+            project=project,
+            location=location,
+            state=state,
+        )
     raise ValueError("A stable lead identifier is required (lead_id, id, or external_id)")
 
 
@@ -621,6 +639,59 @@ def _parse_location(location_value: Any, state_value: Any) -> tuple[str | None, 
     return city or None, state
 
 
+def _canonical_identity_text(value: Any) -> str | None:
+    """Return the locale-independent text used by natural-key hashing."""
+
+    text = _clean_text(value)
+    if text is None:
+        return None
+    normalized = unicodedata.normalize("NFKC", text)
+    normalized = re.sub(r"\s+", " ", normalized).strip().casefold()
+    return normalized or None
+
+
+def derive_earlybid_natural_id(
+    *,
+    identity_scope: str,
+    project: Any,
+    location: Any,
+    state: Any = None,
+) -> str:
+    """Derive a versioned EarlyBid ID when the source supplies no stable ID.
+
+    The source scope is normally ``reseller/client``. Only the stable natural
+    key participates; mutable feed attributes such as score, URL, contacts,
+    timing, and next step are deliberately excluded.
+    """
+
+    canonical_scope = _canonical_identity_text(identity_scope)
+    canonical_project = _canonical_identity_text(project)
+    canonical_location = _canonical_identity_text(location)
+    if canonical_scope is None:
+        raise ValueError("identity_scope must not be blank")
+    if canonical_project is None:
+        raise ValueError("Project is required to derive an EarlyBid lead identity")
+    if canonical_location is None:
+        raise ValueError("Location is required to derive an EarlyBid lead identity")
+
+    canonical_state_input = _canonical_identity_text(state)
+    city, state_code = _parse_location(canonical_location, canonical_state_input)
+    canonical_city = _canonical_identity_text(city) or canonical_location
+    canonical_state = _canonical_identity_text(state_code) or ""
+    identity_components = [
+        canonical_scope,
+        canonical_project,
+        canonical_city,
+        canonical_state,
+    ]
+    serialized = json.dumps(
+        identity_components,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"{EARLYBID_NATURAL_ID_PREFIX}{hashlib.sha256(serialized).hexdigest()}"
+
+
 def _enum_from_candidates(enum_type: type[_EnumT], *candidates: str) -> _EnumT:
     for candidate in candidates:
         try:
@@ -811,12 +882,16 @@ def _evidence_references(
     return references
 
 
-def normalize_lead(record: Mapping[str, Any]) -> NormalizedLead:
+def normalize_lead(
+    record: Mapping[str, Any], *, identity_scope: str | None = None
+) -> NormalizedLead:
     """Return a typed lead without modifying ``record``.
 
-    ``lead_id``, ``id`` and ``external_id`` are checked in that order.  A value
+    ``lead_id``, ``id`` and ``external_id`` are checked in that order. A value
     such as ``Lead #4`` is rejected because it is a dashboard rank, not an
-    identity that remains stable across feed refreshes.
+    identity that remains stable across feed refreshes. When all explicit IDs
+    are absent, callers may supply a stable EarlyBid ``identity_scope`` to
+    derive an ID from the project and location natural key.
     """
 
     if not isinstance(record, Mapping):
@@ -824,12 +899,19 @@ def normalize_lead(record: Mapping[str, Any]) -> NormalizedLead:
 
     source_values = copy.deepcopy(dict(record))
     lookup = _record_lookup(record)
-    lead_id = _resolve_lead_id(record, lookup)
 
     raw_values: dict[str, Any] = {
         field: _get_value(record, lookup, *aliases)
         for field, aliases in _FIELD_ALIASES.items()
     }
+    lead_id = _resolve_lead_id(
+        record,
+        lookup,
+        identity_scope=identity_scope,
+        project=raw_values["project"],
+        location=raw_values["location"],
+        state=raw_values["state"],
+    )
     text_values = {
         field: _clean_text(raw_values[field])
         for field in (
@@ -898,6 +980,8 @@ def normalize_lead(record: Mapping[str, Any]) -> NormalizedLead:
 
 
 __all__ = [
+    "EARLYBID_NATURAL_ID_PREFIX",
+    "derive_earlybid_natural_id",
     "determine_audience",
     "determine_stage",
     "normalize_lead",

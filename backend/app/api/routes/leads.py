@@ -11,7 +11,7 @@ from app.db.database import get_db
 from app.db.models import Lead
 from app.schemas.lead import LeadRead, SyncResult
 from app.services import lead_feed_service
-from app.services.lead_feed_service import LeadFeedError
+from app.services.lead_feed_service import LeadFeedError, LeadFeedValidationError
 
 settings = get_settings()
 
@@ -24,9 +24,11 @@ def sync_feed(
     client: str | None = None,
     db: Session = Depends(get_db),
 ):
-    """Pull the latest EarlyBid feed and upsert opportunities on their `id`.
+    """Pull and upsert EarlyBid opportunities using source-scoped identities.
 
-    Defaults to the feed configured in settings when reseller/client are omitted.
+    Explicit source IDs remain supported; ID-less rows use the configured feed
+    scope plus their normalized project and location natural key. Defaults to
+    the configured reseller/client when those query parameters are omitted.
     """
     try:
         return lead_feed_service.sync_feed(
@@ -34,6 +36,11 @@ def sync_feed(
             reseller or settings.lead_feed_reseller,
             client or settings.lead_feed_client,
         )
+    except LeadFeedValidationError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=exc.as_detail(),
+        ) from exc
     except LeadFeedError as exc:
         raise HTTPException(
             status_code=502,
@@ -47,11 +54,21 @@ async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)
     text = (await file.read()).decode("utf-8-sig")
     rows = lead_feed_service.parse_feed_csv(text)
 
-    touched, _, _ = lead_feed_service.upsert_feed_rows(
-        db,
-        rows,
-        source_feed=f"upload:{file.filename}",
-    )
+    try:
+        touched, _, _ = lead_feed_service.upsert_feed_rows(
+            db,
+            rows,
+            source_feed=f"upload:{file.filename}",
+            identity_scope=lead_feed_service.earlybid_identity_scope(
+                settings.lead_feed_reseller,
+                settings.lead_feed_client,
+            ),
+        )
+    except LeadFeedValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=exc.as_detail(),
+        ) from exc
 
     db.commit()
     for lead in touched:
