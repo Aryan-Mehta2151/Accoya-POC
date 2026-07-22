@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # Use the same model ARN configured in the AWS KB test console.
     bedrock_kb_model_arn: str = ""
 
+    # Chatbot
+    # Number of prior human/ai turns sent to Gemini as conversation context.
+    chat_history_max_turns: int = 10
+
     # Gemini
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.5-flash"

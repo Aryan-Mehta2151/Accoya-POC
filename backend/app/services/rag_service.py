@@ -9,8 +9,14 @@ _QA_SYSTEM = (
 )
 
 
+_ROLE_LABELS = {"human": "User", "ai": "Assistant"}
+
+
 def answer_question(question: str, history: list[dict] | None = None) -> tuple[str, list[str]]:
     """Retrieve relevant context and generate a grounded answer.
+
+    Only the current question is sent to Bedrock retrieval. The prior
+    conversation history is included solely in the Gemini prompt.
 
     Returns (answer, source_list).
     """
@@ -18,13 +24,17 @@ def answer_question(question: str, history: list[dict] | None = None) -> tuple[s
     context = "\n\n---\n\n".join(c.text for c in chunks)
     sources = sorted({c.source for c in chunks if c.source})
 
-    history_text = ""
+    history_block = ""
     if history:
-        history_text = "\n".join(f"{m['role']}: {m['content']}" for m in history)
+        history_text = "\n".join(
+            f"{_ROLE_LABELS.get(m['role'], m['role'])}: {m['content']}"
+            for m in history
+        )
+        history_block = f"Conversation so far:\n{history_text}\n\n"
 
     prompt = (
         f"{_QA_SYSTEM}\n\n"
-        f"Conversation so far:\n{history_text}\n\n"
+        f"{history_block}"
         f"Context:\n{context}\n\n"
         f"Question: {question}\n\n"
         f"Answer:"

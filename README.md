@@ -50,15 +50,24 @@ warning and composition continues with whatever context is available.
 ### Prerequisites
 
 - Python 3.11 or newer
-- PostgreSQL listening on `localhost:5433` (the implementation is verified
-  with PostgreSQL 18.4)
+- Docker Desktop or another local PostgreSQL instance
 - Node.js `^20.19.0`, `^22.13.0`, or `>=24`
 - Provider credentials only for the live features you intend to exercise
 
-The repository has no Docker setup and does not install or start PostgreSQL.
 Run backend commands from `backend/` and frontend commands from `frontend/`.
 
 ### 1. Configure and bootstrap PostgreSQL
+
+The repo now includes a local Docker Compose setup for PostgreSQL. Start it
+from the repository root:
+
+```powershell
+docker compose up -d
+```
+
+This starts PostgreSQL 16 on `localhost:5432` with local-development
+credentials `postgres` / `postgres`. The backend bootstrap command creates the
+`ai_marketing` database automatically when it does not exist.
 
 ```powershell
 cd backend
@@ -72,7 +81,7 @@ Set the local connection in the ignored `backend/.env`; keep real credentials
 out of `.env.example` and other tracked files:
 
 ```dotenv
-DATABASE_URL=postgresql+psycopg2://postgres:YOUR_PASSWORD@localhost:5433/accoya_agent
+DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/ai_marketing
 ```
 
 Then create the database, if needed, and migrate it to the current Alembic
@@ -132,7 +141,7 @@ directory.
 | Area | Variables | Behavior |
 | --- | --- | --- |
 | Application | `APP_ENV`, `API_PREFIX` | The default prefix is `/api`. Raw `/api/agent/*` diagnostics are registered only when `APP_ENV=development`. |
-| PostgreSQL | `DATABASE_URL` | Must be a PostgreSQL SQLAlchemy URL with a database name. The documented psycopg2 example targets port 5433 and database `accoya_agent`. |
+| PostgreSQL | `DATABASE_URL` | Must be a PostgreSQL SQLAlchemy URL with a database name. The local Docker setup targets port 5432 and database `ai_marketing`. |
 | AWS | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | The region must contain the configured KB and S3 resources. Leave explicit keys blank to use boto3's normal credential chain or an IAM role. |
 | Strategy documents | `S3_BUCKET_STRATEGY_DOCS` | Required for document upload, list, and delete operations. |
 | Bedrock KB | `BEDROCK_KB_ID`, `BEDROCK_KB_TOP_K` | Used for both email-agent retrievals. |

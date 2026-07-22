@@ -31,16 +31,22 @@ class KbAnswer:
 
 def retrieve(query: str, top_k: int | None = None) -> list[RetrievedChunk]:
     """Return the most relevant chunks from the knowledge base for a query."""
+    if not settings.bedrock_kb_id:
+        raise BedrockKnowledgeBaseError("BEDROCK_KB_ID is not set")
+
     client = bedrock_agent_runtime_client()
-    response = client.retrieve(
-        knowledgeBaseId=settings.bedrock_kb_id,
-        retrievalQuery={"text": query},
-        retrievalConfiguration={
-            "vectorSearchConfiguration": {
-                "numberOfResults": top_k or settings.bedrock_kb_top_k
-            }
-        },
-    )
+    try:
+        response = client.retrieve(
+            knowledgeBaseId=settings.bedrock_kb_id,
+            retrievalQuery={"text": query},
+            retrievalConfiguration={
+                "vectorSearchConfiguration": {
+                    "numberOfResults": top_k or settings.bedrock_kb_top_k
+                }
+            },
+        )
+    except Exception as exc:
+        raise BedrockKnowledgeBaseError(f"Bedrock KB retrieve failed: {exc}") from exc
 
     chunks: list[RetrievedChunk] = []
     for result in response.get("retrievalResults", []):

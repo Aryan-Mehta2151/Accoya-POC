@@ -334,10 +334,20 @@ class ChatMessage(Base):
     """Chat history for the QnA chatbot (grouped by session_id)."""
 
     __tablename__ = "chat_messages"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "seq",
+            name="uq_chat_messages_session_seq",
+        ),
+        Index("ix_chat_messages_session_seq", "session_id", "seq"),
+    )
 
     id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
     session_id: Mapped[str] = mapped_column(String(36), index=True)
-    role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
+    # Per-session 1-based message serial number for stable ordering.
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(16))  # "human" | "ai"
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
