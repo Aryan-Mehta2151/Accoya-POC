@@ -2,9 +2,16 @@
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+)
 
 from app.db.models import EmailStatus
+from app.email_text import normalize_email_body
 
 
 EmailSubject = Annotated[
@@ -24,6 +31,12 @@ class EmailRead(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    @field_validator("body")
+    @classmethod
+    def normalize_body(cls, value: str) -> str:
+        return normalize_email_body(value)
+
+
 class EmailStatusUpdate(BaseModel):
     status: EmailStatus
     actor: str | None = None
@@ -32,6 +45,11 @@ class EmailStatusUpdate(BaseModel):
 class EmailEdit(BaseModel):
     subject: EmailSubject | None = None
     body: str | None = None
+
+    @field_validator("body")
+    @classmethod
+    def normalize_body(cls, value: str | None) -> str | None:
+        return normalize_email_body(value) if value is not None else None
 
 
 class EmailGenerationErrorDetail(BaseModel):

@@ -29,30 +29,36 @@ export type SyncResult = {
 };
 
 export type EmailStatus =
-  | "draft"
-  | "pending_review"
-  | "approved"
-  | "sent"
-  | "rejected";
+  | 'draft'
+  | 'pending_review'
+  | 'approved'
+  | 'sent'
+  | 'rejected';
 
 export type Email = {
   id: string;
   lead_id: string;
-  subject: string | null;
+  subject: string;
   body: string;
   status: EmailStatus;
   created_at: string;
   updated_at: string;
 };
 
-export type StrategyDoc = {
+export type StrategyDocument = {
   id: string;
-  filename: string;
   s3_key: string;
-  created_at?: string;
-  last_modified?: string;
+  filename: string;
   size?: number;
-  url?: string;
+  last_modified?: string;
+  url?: string | null;
+};
+
+export type ChatMessage = {
+  role: 'user' | 'assistant';
+  content: string;
+  created_at?: string;
+  sources?: string[];
 };
 
 export type ChatResponse = {

@@ -1,75 +1,61 @@
-# React + TypeScript + Vite
+# Accoya Outreach frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Accoya Outreach is the internal sales workspace for turning prioritized EarlyBid opportunities into reviewed, context-aware outreach. This frontend is a React 19 and TypeScript application that consumes the existing FastAPI backend without requiring backend changes.
 
-Currently, two official plugins are available:
+## Local setup
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Use a Node.js version supported by the locked Vite toolchain: `^20.19.0`, `^22.13.0`, or `>=24`.
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```powershell
+cd frontend
+npm ci
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Vite serves the application at `http://localhost:5173`. Start the backend separately at `http://localhost:8000`.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+The API prefix defaults to `http://localhost:8000/api`. To use another backend, create an untracked `.env.local`:
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```dotenv
+VITE_API_BASE_URL=http://localhost:8000/api
 ```
+
+Include the backend API prefix in the value.
+
+## Product areas
+
+- **Overview** — live opportunity, review, approval, and strategy-document summaries.
+- **Opportunities** — local search and filters, EarlyBid sync, CSV import, details, and outreach generation.
+- **Outreach** — editing and the draft, review, approval, rejection, and marked-sent workflow.
+- **Knowledge Base** — S3-backed strategy-document upload, listing, opening, and deletion.
+- **Assistant** — Bedrock knowledge-base chat with session restoration and source display.
+
+The frontend intentionally does not expose agent runs, model details, prompt versions, token usage, traces, or telemetry. The backend may persist those details internally.
+
+Marking outreach as sent updates workflow state only; it does not deliver email. Uploading a strategy document stores it, but the backend does not expose knowledge-base ingestion status.
+
+## Architecture
+
+- `src/app/` contains the routed application shell and navigation.
+- `src/features/` contains one folder for each product area.
+- `src/components/` contains shared accessible UI primitives.
+- `src/lib/api.ts` is the only browser API client and normalizes backend errors.
+- `src/lib/queryKeys.ts` defines shared TanStack Query cache keys.
+- `src/styles/global.css` contains the design tokens, reset, and global controls.
+- Feature presentation is isolated with CSS Modules.
+
+The app uses a React Router data router so unsaved outreach edits can block navigation. TanStack Query owns remote state: GET requests retry once, while mutations never retry automatically.
+
+The assistant keeps only its current Bedrock session identifier in `sessionStorage`. It restores messages through the backend history endpoint when the page reloads.
+
+## Verification
+
+```powershell
+npm run lint
+npm run test:run
+npm run build
+```
+
+Tests are offline and mock all network interactions. They must not call EarlyBid, S3, Bedrock, Gemini, email services, or a live database.
+
+Use `npm test` during development for watch mode. Before handing off UI changes, also inspect the application at desktop, tablet, and 390px mobile widths.

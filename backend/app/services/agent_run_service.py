@@ -28,6 +28,7 @@ from app.db.models import (
     EmailStatusEvent,
     Lead,
 )
+from app.email_text import normalize_email_body
 from app.services.email_generator import EmailAgent, build_agent_lead
 
 
@@ -316,7 +317,12 @@ def _persist_terminal_result(
         run.warnings = list(result.warnings)
         run.error_code = None if status is AgentRunStatus.generated else status.value
         run.original_subject = result.subject
-        run.original_body = result.body
+        normalized_body = (
+            normalize_email_body(result.body)
+            if result.body is not None
+            else None
+        )
+        run.original_body = normalized_body
         run.prompt_version = result.prompt_version or run.prompt_version
         run.catalog_version = CATALOG_VERSION
         run.model_name = telemetry.model_name or run.model_name
@@ -335,7 +341,7 @@ def _persist_terminal_result(
                 agent_run_id=run_id,
                 recipient_email=recipient_email,
                 subject=result.subject,
-                body=result.body,
+                body=normalized_body,
                 status=EmailStatus.pending_review,
             )
             db.add(email)

@@ -42,15 +42,15 @@ TypeScript 6, Vite 8, native `fetch`, and global CSS.
 - `backend/agent/`: standalone synchronous Accoya email agent, including
   normalization, catalog routing, Gemini stages, Bedrock retrieval, telemetry,
   and offline unit tests.
-- `frontend/src/App.tsx`: in-memory tab shell; there is no client-side router.
-- `frontend/src/pages/`: hook-based page components, one per main feature.
-- `frontend/src/api.ts`: all browser API calls and `VITE_API_BASE_URL` handling.
+- `frontend/src/App.tsx`: React Router data-router configuration for the SPA.
+- `frontend/src/app/`: the responsive application shell and navigation.
+- `frontend/src/features/`: page components and CSS Modules grouped by product area.
+- `frontend/src/lib/api.ts`: typed browser API calls, normalized errors, and
+  `VITE_API_BASE_URL` handling.
 - `frontend/src/types.ts`: shared TypeScript representations of server data.
-- `frontend/src/App.css` and `frontend/src/index.css`: global styles. The latter
-  still contains Vite-template styling, so account for the global cascade.
+- `frontend/src/styles/global.css`: global design tokens, reset, and shared controls.
 - `README.md`: backend-centric overview and setup notes.
-- `frontend/README.md`: unchanged Vite template documentation; it is not a
-  project guide.
+- `frontend/README.md`: frontend setup, architecture, behavior, and verification guide.
 
 There is no root task runner, Docker setup, CI workflow, or Python
 lint/type-check configuration. Backend tests use unittest; routine tests are
@@ -226,6 +226,7 @@ python -m unittest discover -s tests -v
 
 # frontend/
 npm run lint
+npm run test:run
 npm run build
 ```
 

@@ -270,6 +270,31 @@ class EmailAgentIntegrationTests(unittest.TestCase):
         self.assertNotEqual(first.json()["id"], second.json()["id"])
         self.assertEqual(self._email_count(), 2)
 
+    def test_generated_and_edited_bodies_normalize_escaped_newlines(self):
+        lead = self._seed_lead()
+        self.agent.body = "Opening paragraph.\\n\\nSecond paragraph."
+
+        generated = self.client.post(f"/api/emails/generate/{lead.id}")
+
+        self.assertEqual(generated.status_code, 200)
+        self.assertEqual(
+            generated.json()["body"],
+            "Opening paragraph.\n\nSecond paragraph.",
+        )
+        email_id = generated.json()["id"]
+
+        edited = self.client.patch(
+            f"/api/emails/{email_id}",
+            json={"body": "First line.\\r\\n\\r\\nFinal line."},
+        )
+
+        self.assertEqual(edited.status_code, 200)
+        self.assertEqual(edited.json()["body"], "First line.\n\nFinal line.")
+        with self.session_factory() as db:
+            saved = db.get(Email, email_id)
+            self.assertIsNotNone(saved)
+            self.assertEqual(saved.body, "First line.\n\nFinal line.")
+
     def test_missing_contact_email_does_not_block_generation(self):
         lead = self._seed_lead(
             external_id="earlybid-no-recipient",
