@@ -7,7 +7,7 @@ sent to AWS retrieval. The conversation history is provided solely to Gemini.
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -139,3 +139,13 @@ def get_history(session_id: str, db: Session = Depends(get_db)):
         )
         for row in rows
     ]
+
+
+@router.delete("/{session_id}")
+def delete_session(session_id: str, db: Session = Depends(get_db)):
+    """Delete all messages in a session (deletes the session from the database)."""
+    db.execute(
+        delete(ChatMessage).where(ChatMessage.session_id == session_id)
+    )
+    db.commit()
+    return {"deleted": True, "session_id": session_id}

@@ -3,7 +3,7 @@
 After upload to S3, trigger a Bedrock Knowledge Base ingestion job (or rely on
 scheduled sync) so the doc becomes searchable. Ingestion wiring is a TODO.
 """
-import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import select
@@ -19,14 +19,17 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 @router.post("/upload")
 async def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db)):
     file_bytes = await file.read()
-    key = f"{uuid.uuid4()}-{file.filename}"
+    filename = Path(file.filename or "").name.strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="File name is required.")
+    key = filename
     try:
         s3_service.upload_strategy_doc(file_bytes, key, file.content_type)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"S3 upload failed: {exc}") from exc
 
     doc = StrategyDocument(
-        filename=file.filename,
+        filename=filename,
         s3_key=key,
         content_type=file.content_type,
     )
@@ -44,7 +47,7 @@ async def upload_document(file: UploadFile = File(...), db: Session = Depends(ge
     return {
         "id": key,
         "s3_key": key,
-        "filename": file.filename,
+        "filename": filename,
         "url": url,
     }
 

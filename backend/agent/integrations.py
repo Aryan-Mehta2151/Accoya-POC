@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import logging
+import time
 from pathlib import PurePosixPath
 from typing import Any, Generic, Mapping, Protocol, TypeVar
 
@@ -21,7 +23,25 @@ from app.config import Settings, get_settings
 from .models import StrategyChunk, TokenUsage
 
 
+logger = logging.getLogger(__name__)
+
 StructuredT = TypeVar("StructuredT", bound=BaseModel)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Return True for retryable provider overload/rate-limit errors."""
+    status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if status in (429, 500, 503):
+        return True
+    text = str(exc).upper()
+    return (
+        "503" in text
+        or "429" in text
+        or "UNAVAILABLE" in text
+        or "RESOURCE_EXHAUSTED" in text
+        or "OVERLOADED" in text
+        or "HIGH DEMAND" in text
+    )
 
 
 class ModelInvocationError(RuntimeError):
@@ -129,19 +149,11 @@ class GeminiStructuredModel:
                 model=self._model_name,
                 google_api_key=self._api_key,
                 temperature=temperature,
-                model_kwargs={
-                    "system_instruction": [
-                        {
-                            "type": "text",
-                            "text": system_prompt,
-                            "cache_control": {"type": "EPHEMERAL"}
-                        }
-                    ]
-                }
             )
             runnable = llm.with_structured_output(schema, include_raw=True)
-            response = runnable.invoke(
-                [("system", system_prompt), ("human", user_prompt)]
+            response = self._invoke_with_retry(
+                runnable,
+                [("system", system_prompt), ("human", user_prompt)],
             )
             parsed = response.get("parsed") if isinstance(response, Mapping) else None
             parsing_error = (
@@ -163,8 +175,42 @@ class GeminiStructuredModel:
         except ModelInvocationError:
             raise
         except Exception as exc:  # provider exceptions vary by SDK release
+            logger.error(
+                "Gemini call failed (model=%s): %s", self._model_name, exc
+            )
             raise ModelInvocationError(f"Gemini invocation failed: {exc}") from exc
         return StructuredInvocation(value=parsed, usage=usage)
+
+    def _invoke_with_retry(
+        self,
+        runnable: Any,
+        messages: list[tuple[str, str]],
+        *,
+        max_attempts: int = 4,
+    ) -> Any:
+        """Invoke the model, retrying transient 503/429 overload errors."""
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return runnable.invoke(messages)
+            except Exception as exc:  # noqa: BLE001 - inspect message for retryable codes
+                if not _is_transient_error(exc) or attempt == max_attempts:
+                    raise
+                last_exc = exc
+                delay = min(2 ** (attempt - 1), 8)
+                logger.warning(
+                    "Gemini transient error (model=%s, attempt %d/%d); "
+                    "retrying in %ds: %s",
+                    self._model_name,
+                    attempt,
+                    max_attempts,
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
+        # Unreachable: loop either returns or raises.
+        raise last_exc if last_exc else RuntimeError("retry loop failed")
+
 
 
 class BedrockStrategyRetriever:

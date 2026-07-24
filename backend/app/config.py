@@ -41,7 +41,7 @@ class Settings(BaseSettings):
 
     # Gemini
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-3.5-flash"
+    gemini_model: str = "gemini-2.5-flash"
 
     # Lead source API (EarlyBid feed)
     lead_api_base_url: str = "https://api.earlybid.bid"
