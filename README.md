@@ -1,13 +1,15 @@
 # AI Marketing Outreach POC
 
 An unauthenticated proof of concept that ingests EarlyBid construction
-opportunities, generates personalized Accoya nurturing emails, supports human
-review, manages strategy documents, and provides a knowledge-base chatbot.
+opportunities, queues personalized Accoya nurturing emails for background
+generation, supports human review on each opportunity, manages strategy
+documents, and provides a knowledge-base chatbot.
 
-The current backend is agent-centric: every generation attempt is represented
-by a durable `agent_runs` record, including expected and unexpected failures.
-The standalone agent remains database-independent; FastAPI owns orchestration,
-persistence, and the production-safe API contracts.
+The backend separates requested work from provider execution. Every request is
+first represented by a durable `email_generation_jobs` record, and every
+claimed attempt is represented by an `agent_runs` record, including expected
+and unexpected failures. The standalone agent remains database-independent;
+FastAPI owns queueing, persistence, and the production-safe API contracts.
 
 ## Architecture
 
@@ -22,17 +24,19 @@ persistence, and the production-safe API contracts.
 ```text
 EarlyBid CSV -> agent normalization -> current PostgreSQL lead projection
                                            |
-                                           `-> committed agent_run (running)
+                                           `-> queued email_generation_job
                                                   |
-                                                  `-> AccoyaEmailAgent
+                                                  `-> separate worker
                                                          |
-                                                         `-> terminal run outcome
+                                                         `-> agent_run + provider work
                                                                 |
-                                                                `-> review email
-                                                                     + status events
+                                                                `-> terminal job/run
+                                                                       |
+                                                                       `-> review email
+                                                                            + status events
 ```
 
-The synchronous successful path performs these stages in order:
+The worker's successful agent path performs these stages in order:
 
 1. Gemini selects a catalog product family and application.
 2. Bedrock retrieves product strategy context.
@@ -41,7 +45,7 @@ The synchronous successful path performs these stages in order:
 5. Gemini composes the subject and body.
 
 That is at most three Gemini calls and two Bedrock retrievals per successful
-request. Both retrievals use `BEDROCK_KB_TOP_K`. Low-confidence and terminal
+job. Both retrievals use `BEDROCK_KB_TOP_K`. Low-confidence and terminal
 analysis outcomes skip all later work. Missing or failed retrieval adds a safe
 warning and composition continues with whatever context is available.
 
@@ -112,9 +116,29 @@ python -m uvicorn app.main:app --reload
 - OpenAPI: `http://localhost:8000/docs`
 - Health: `http://localhost:8000/health`
 
-### 3. Start the React frontend
+### 3. Start the email-generation worker
 
-In a second terminal:
+In a second backend terminal, activate the same virtual environment and start
+one worker:
+
+```powershell
+cd backend
+python -m app.workers.email_generation
+```
+
+The web process only queues generation. It never calls Gemini or Bedrock while
+handling a sync, CSV upload, or manual generation request. Queued jobs survive
+web and worker restarts. Run one worker by default for this POC; PostgreSQL row
+locking also prevents multiple workers from claiming the same job.
+
+The worker exits without claiming work when required provider configuration is
+missing. It does not automatically replay an ambiguous provider call:
+`insufficient_context`, provider failures, system failures, and abandoned
+leases remain terminal until a user explicitly retries.
+
+### 4. Start the React frontend
+
+In another terminal:
 
 ```powershell
 cd frontend
@@ -127,10 +151,12 @@ Open `http://localhost:5173`. Browser requests default to
 API base, including the prefix. FastAPI allows the local `localhost` and
 `127.0.0.1` Vite origins on port 5173.
 
-An empty database is a valid starting point, so the Leads, Email Approval, and
-agent-run API lists remain empty until data is ingested and generation runs are
-created. Sync, document, agent, and chat actions may call live services and can
-incur charges.
+An empty database is a valid starting point, so opportunities and agent-run API
+lists remain empty until data is ingested. Newly inserted opportunities queue
+their first draft; existing or updated opportunities are never regenerated by
+sync. The opportunity page provides explicit Generate, Regenerate, or Retry
+actions when applicable. Provider work, document operations, sync, and chat may
+process contact data, mutate external resources, or incur charges.
 
 ## Configuration
 
@@ -146,12 +172,13 @@ directory.
 | Strategy documents | `S3_BUCKET_STRATEGY_DOCS` | Required for document upload, list, and delete operations. |
 | Bedrock KB | `BEDROCK_KB_ID`, `BEDROCK_KB_TOP_K` | Used for both email-agent retrievals. |
 | Bedrock chat | `BEDROCK_KB_MODEL_ARN` | Model ID or ARN used by the separate `RetrieveAndGenerate` chatbot flow. |
-| Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL` | Used by the three structured email-agent model stages. |
+| Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_REQUEST_TIMEOUT_SECONDS` | Used by the worker's structured email agent; the 180-second default applies to each Gemini request. |
+| Email worker | `EMAIL_GENERATION_WORKER_POLL_SECONDS`, `EMAIL_GENERATION_HEARTBEAT_SECONDS`, `EMAIL_GENERATION_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. The stale threshold must remain comfortably above the heartbeat interval and expected scheduling jitter. |
 | EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Configures Bearer-authenticated feed sync. The reseller/client scope is also part of the derived identity for rows without a source ID. |
 | Frontend | `VITE_API_BASE_URL` | Optional full browser API base; include `/api` unless `API_PREFIX` changes. |
 
 Settings and the configured email agent are process-cached. Restart FastAPI
-after changing environment values.
+and the worker after changing environment values.
 
 ## Agent-centric PostgreSQL database
 
@@ -161,6 +188,9 @@ schema. It imports no old records and intentionally has no backfill path:
 - `0001_agent_centric_baseline` creates the complete application schema.
 - `0002_agent_run_pagination_index` adds the `(started_at, id)` index used by
   unfiltered descending agent-run cursor pagination.
+- `0004_email_generation_queue` adds durable email-generation jobs and links a
+  claimed job to at most one agent run. Applying it does not enqueue or
+  generate drafts for existing leads.
 
 PostgreSQL stores identifiers as native `UUID`, flexible source data as
 `JSONB`, timestamps as timezone-aware `TIMESTAMPTZ`, and agent/email lifecycle
@@ -171,11 +201,17 @@ application/database length cap.
 ### Tables and relationships
 
 ```text
-leads 1 ---- * agent_runs
-                 |  ^
-                 |  `---- optional retry_of_run_id (self-reference)
-                 |
-                 `---- 0..1 emails 1 ---- * email_status_events
+leads 1 ---- * email_generation_jobs
+                 |  ^              |
+                 |  `---- optional retry_of_job_id
+                 |                 |
+                 |                 `---- 0..1 agent_runs
+                 |                                |
+                 `--------------------------------`
+                                                  |
+                                                  `---- 0..1 emails
+                                                             |
+                                                             `---- * email_status_events
 
 chat_messages                 strategy_documents
 ```
@@ -183,7 +219,8 @@ chat_messages                 strategy_documents
 | Table | Purpose and important invariants |
 | --- | --- |
 | `leads` | Current normalized lead projection with native UUID primary key and unique `(source_system, external_id)` identity. It stores all current agent inputs, first-class `next_step`, optional `contact_email`, JSONB tags and detached raw feed payload, source metadata, and create/update/archive timestamps. Feed sync updates this projection rather than creating historical snapshots. |
-| `agent_runs` | One durable attempt for one lead, with optional `retry_of_run_id`. Status is `running`, `generated`, `insufficient_context`, `provider_error`, or `system_error`. A run stores the curated-input SHA-256 hash, safe selections/warnings/error code, immutable original draft, prompt/catalog versions, model name, aggregate model/retrieval/token counts, latency, and start/completion times. Database checks enforce the SHA-256 shape, nonnegative telemetry, nurturing numbers 1-7, and valid running/generated/failure terminal shapes. |
+| `email_generation_jobs` | Durable requested work for one lead. A job records its trigger, requested input hash, idempotency key, optional retry link, safe error code, attempt count, and queue/claim/heartbeat/completion timestamps. Status is `queued`, `running`, `generated`, `insufficient_context`, `provider_error`, or `system_error`. A unique idempotency key makes request replay safe, and a PostgreSQL partial unique index allows at most one queued/running job per lead. |
+| `agent_runs` | One durable attempt for one lead, with optional `retry_of_run_id` and nullable unique `email_generation_job_id` for worker-created attempts. Status is `running`, `generated`, `insufficient_context`, `provider_error`, or `system_error`. A run stores the curated-input SHA-256 hash, safe selections/warnings/error code, immutable original draft, prompt/catalog versions, model name, aggregate model/retrieval/token counts, latency, and start/completion times. Database checks enforce the SHA-256 shape, nonnegative telemetry, nurturing numbers 1-7, and valid running/generated/failure terminal shapes. |
 | `emails` | At most one mutable review email for a generated run through a unique, non-null `agent_run_id`. It stores unrestricted subject/body text, optional recipient snapshot, review status, and timestamps. `lead_id` in the existing API response is derived through the run instead of duplicated. |
 | `email_status_events` | Append-only status history. The generated email starts with a `pending_review` event; later changes store previous/new status, optional actor, and timestamp. Status updates lock the email row so concurrent transitions retain a contiguous audit chain. Same-status requests are no-ops. |
 | `chat_messages` | Existing user/assistant chat history grouped by `session_id`. |
@@ -199,11 +236,11 @@ EarlyBid natural identity is stored in the existing unrestricted
 external_id)` constraint. This is an ingestion-only change and requires no
 database migration.
 
-Deleting a lead cascades through its runs, generated emails, and status events;
-a retry link uses `RESTRICT` so an attempt referenced by a retry cannot be
-removed independently. Indexes cover lead score/archive queries, run
-lead/status/time and cursor queries, email status/time queries, and event
-history.
+Deleting a lead cascades through its generation jobs, runs, generated emails,
+and status events. Deleting a referenced generation job clears its job retry
+link, while run retry links use `RESTRICT`. Indexes cover active job claiming,
+lead score/archive queries, run lead/status/time and cursor queries, email
+status/time queries, and event history.
 
 An `agent_runs` record deliberately does **not** persist its curated/normalized
 input snapshot, routing hints, prompts, retrieval queries or chunks, document
@@ -242,6 +279,19 @@ natural-identity component, or conflicting duplicate identity returns HTTP
 either case, no rows from that batch are written, rather than silently skipping
 or partially importing them.
 
+Each lead first inserted by either ingestion path queues exactly one initial
+generation in the same database transaction. The deterministic
+`initial-v1:<lead-id>` idempotency key makes repeated ingestion safe. Updating
+an existing lead, including changing agent-relevant fields, never queues
+another draft automatically. The migration and deployment do not backfill
+existing leads; those leads show a manual Generate action on their opportunity
+page. Provider work is performed only by the separate worker, after ingestion
+has committed and returned.
+
+The sync response includes `generation_queued`. CSV upload now returns
+`{items, created, updated, total, generation_queued}` rather than a bare lead
+array, so clients can report both ingestion and queue results without polling.
+
 The full detached source row is retained in `raw_data` JSONB for the current
 projection, but email generation passes Gemini only an explicit allowlist of
 stored lead fields plus the application lead UUID, source system, and external
@@ -254,13 +304,16 @@ ID. ORM internals and arbitrary raw feed fields are never added to the prompt.
 | GET | `/health` | Process health after successful database/schema startup |
 | POST | `/api/leads/sync` | Fetch and upsert the configured EarlyBid feed |
 | POST | `/api/leads/upload-csv` | Normalize and upsert an uploaded feed CSV |
-| GET | `/api/leads` | List current leads by descending score |
-| POST | `/api/agent-runs` | Execute a run for `{ "lead_id": "<uuid>" }` |
+| GET | `/api/leads` | List leads with current-email and latest-generation summaries |
+| GET | `/api/leads/{lead_id}/workspace` | Read an opportunity, email history, active email, staleness, and latest generation |
+| POST | `/api/leads/{lead_id}/email-generations` | Idempotently queue Generate, Regenerate, or Retry work |
+| POST | `/api/agent-runs` | Deprecated compatibility adapter that queues work |
 | GET | `/api/agent-runs` | List safe run records with filters and cursor pagination |
 | GET | `/api/agent-runs/{run_id}` | Read one safe persisted outcome |
-| POST | `/api/agent-runs/{run_id}/retry` | Create a linked attempt using the lead's current projection |
-| POST | `/api/emails/generate/{lead_id}` | Compatibility facade returning one review email |
+| POST | `/api/agent-runs/{run_id}/retry` | Deprecated compatibility adapter that queues a retry |
+| POST | `/api/emails/generate/{lead_id}` | Deprecated compatibility adapter that queues generation |
 | GET | `/api/emails` | List generated review emails |
+| GET | `/api/emails/{email_id}` | Read one email for deep-link compatibility |
 | PATCH | `/api/emails/{email_id}` | Edit mutable subject/body content |
 | POST | `/api/emails/{email_id}/status` | Update review status and append an audit event |
 | POST | `/api/documents/upload` | Upload a strategy document to S3 and save metadata |
@@ -269,47 +322,49 @@ ID. ORM internals and arbitrary raw feed fields are never added to the prompt.
 | POST | `/api/chat` | Ask the Bedrock knowledge-base chatbot |
 | GET | `/api/chat/{session_id}` | Read stored chat history |
 
-### Persisted agent runs
+### Durable generation queue and agent runs
 
-`POST /api/agent-runs` is synchronous. The service:
+Generation requests accept a caller-generated UUID idempotency key and return
+HTTP 202 with the queued job, or the original job when the same key is replayed.
+If a lead already has queued/running work, the endpoint returns that active job
+instead of creating competing provider work. Automatic initial jobs use the
+deterministic `initial-v1:<lead-id>` key.
 
-1. Loads the lead and hashes its curated input.
-2. Inserts and commits a `running` run before any provider call.
-3. Invokes the agent without an open database transaction.
-4. Atomically finalizes the run and, only for `generated`, creates the email and
-   initial status event.
+The worker claims the oldest queued job with `SELECT ... FOR UPDATE SKIP
+LOCKED`, creates and commits the linked `running` agent run, captures the
+curated lead input, and releases database locks before invoking the provider.
+It heartbeats running jobs and finalizes stale leases as `system_error`; stale
+work is not automatically requeued because the provider may already have
+accepted the call.
 
-Generated, insufficient-context, and provider-error outcomes return HTTP 201
-with the completed safe run record. Unexpected exceptions persist
-`system_error` and return HTTP 500 with only a safe code, message, and `run_id`.
+Finalization updates the job and run atomically. A generated outcome also
+creates one mutable email and its initial `pending_review` status event.
+Insufficient context and provider failures retain safe terminal records without
+an email. Unexpected exceptions are recorded as `system_error` without raw
+provider details.
 
 `GET /api/agent-runs` accepts optional `lead_id`, `status`, and opaque `cursor`
 parameters. Results are newest first; `limit` defaults to 50 and allows 1-100.
 Invalid cursors return 400. Retry returns 404 when the prior run or lead is
 missing, accepts only terminal runs, and returns 409 for a still-running
-attempt. It creates a new linked run using the lead's current projection; prior
-attempts are never overwritten.
+attempt. It queues linked work from the lead's current projection; the worker
+creates the new run when it claims that job. Prior attempts are never
+overwritten.
 
-### Email compatibility and review
+### Opportunity email workspace and review
 
-The existing frontend contract is preserved by
-`POST /api/emails/generate/{lead_id}`. A generated result returns the same
-top-level email DTO in `pending_review`. Every successful request creates a
-separate run and draft, and a missing recipient address does not prevent
-drafting.
+The opportunity workspace returns the lead, emails newest first, the current
+email ID, whether that current draft was generated from older lead input, and
+the latest generation job. A newer draft does not delete or mutate prior
+emails; history remains available read-only in the UI. The stored
+`recipient_email` snapshot is returned with each email so a later feed update
+does not make an old draft appear addressed to a different contact.
 
-| HTTP status | Generation facade outcome |
-| --- | --- |
-| 404 | Lead not found |
-| 422 | Insufficient lead context; response contains safe `code`, `message`, and `warnings` |
-| 502 | Generation provider failure with the same safe error shape |
-| 500 | Unexpected system or persistence failure without provider details |
-
-All attempts, including failures, retain an `agent_runs` row; only successful
-generation creates an email. The production email endpoint never returns raw
-lead data, KB chunks, or agent telemetry. Human edits update only the mutable
-email, leaving the original generated subject/body on the run unchanged.
-Malformed and nonexistent email UUIDs return the stable 404 response.
+All attempts, including failures, retain durable job/run records; only
+successful generation creates an email. The production endpoints never return
+raw lead data, KB chunks, prompts, or agent telemetry. Human edits update only
+the mutable email, leaving the original generated subject/body on the run
+unchanged. Malformed and nonexistent identifiers return stable 404 responses.
 
 ### Development-only diagnostics
 
@@ -330,13 +385,15 @@ APIs.
 - The email agent uses Gemini plus two independent Bedrock `Retrieve` calls.
   Retrieval failures are nonterminal; required model-stage failures return a
   safe provider outcome.
+- Feed sync and CSV upload only persist leads and jobs; they never instantiate
+  or invoke the email agent. Only the worker performs billable generation.
+- Structured operational logs contain job/run/lead identifiers, status,
+  warning counts, call counts, token totals, and latency - not lead contents,
+  generated email text, prompts, or retrieved chunk text.
 - The chatbot uses Bedrock `RetrieveAndGenerate` directly and retries once
   without a stale Bedrock session ID.
 - Strategy document upload stores a UUID-prefixed object in S3 and records
   metadata in PostgreSQL, but it does not trigger a Bedrock KB ingestion job.
-- Structured operational logs contain identifiers, status, warning counts,
-  call counts, and latency - not lead contents, generated email text, or retrieved
-  chunk text.
 
 ## Verification
 
@@ -349,6 +406,7 @@ verification.
 # From backend/
 python -m compileall -q app agent alembic
 python -m unittest discover -s agent/tests -t . -p "test_*.py"
+python -m unittest tests.test_email_generation_queue -v
 python -m unittest discover -s tests -v
 
 # From frontend/
@@ -356,18 +414,19 @@ npm run lint
 npm run build
 ```
 
-The offline ingestion tests cover explicit-ID precedence, deterministic
-`earlybid-natural-v1` IDs, repeat imports, mutable-field changes, scope
-separation, invalid components, duplicate conflicts, and the upload/sync
-422/502 atomic failure contracts. The supplied ten-lead EarlyBid-shaped sample
-is also exercised without contacting EarlyBid or persisting its contact data.
+The offline suites cover new-only automatic queueing, replay-safe manual
+queueing, sync/upload response counts, workspace ordering and staleness,
+provider-free worker outcomes, and the rule that ingestion never invokes a
+provider. Existing ingestion coverage includes explicit-ID precedence,
+deterministic `earlybid-natural-v1` IDs, repeat imports, mutable-field changes,
+scope separation, invalid components, duplicate conflicts, and the upload/sync
+422/502 atomic failure contracts.
 
-The opt-in PostgreSQL integration suite verifies clean/idempotent bootstrap,
-native types and defaults, normalized JSONB ingestion, all run outcomes,
-running-before-provider transaction boundaries, immutable originals, long
-subjects, retry and hash behavior, cursor pagination, email compatibility, and
-concurrent contiguous status events. Use only a dedicated database whose name
-ends in `_test`:
+The opt-in PostgreSQL integration suite additionally verifies migration/index
+constraints, partial active-job uniqueness, `SKIP LOCKED` claiming, stale
+lease handling, clean/idempotent bootstrap, native types/defaults, immutable
+originals, and concurrent status-event ordering. Use only a dedicated database
+whose name ends in `_test`:
 
 ```powershell
 # From backend/; PostgreSQL must be listening on port 5433.
@@ -389,13 +448,17 @@ python -m alembic check
 
 - The API has no authentication or authorization and must not be exposed
   publicly.
-- Lead sync, document operations, email generation, and chat can process PII,
-  mutate external resources, or incur provider charges.
+- Lead sync and CSV upload persist contact data and automatically queue a draft
+  for every newly inserted opportunity. The worker, document operations, and
+  chat can call billable or mutating external services.
 - Email status changes do not send mail, and `sent` emails are not indexed into
   the knowledge base.
 - Document upload does not start a Bedrock KB ingestion job.
 - There is no scheduled feed sync, Docker environment, CI workflow, or AWS
   deployment configuration.
+- The worker must be deployed and supervised separately from FastAPI. Deploy
+  the migration, API, and worker together; enable ingestion only after a worker
+  is available.
 - EarlyBid does not supply an immutable opportunity ID. A project rename or
   location correction therefore produces a new lead identity; reconciliation
   of renamed opportunities is not automated.

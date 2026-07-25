@@ -12,7 +12,7 @@ Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=
 
 
 class AgentRunCreate(BaseModel):
-    """Request one synchronous agent execution for the lead's current state."""
+    """Request one queued agent execution for the lead's current state."""
 
     lead_id: Identifier
 
@@ -25,6 +25,7 @@ class AgentRunRead(BaseModel):
     id: str
     lead_id: str
     retry_of_run_id: str | None = None
+    email_generation_job_id: str | None = None
     input_hash: str
     status: AgentRunStatus
     selected_product_family: str | None = None

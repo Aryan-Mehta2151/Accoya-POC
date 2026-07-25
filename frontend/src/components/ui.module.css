@@ -136,6 +136,9 @@
 .status_approved { color: var(--color-success); }
 .status_sent { color: var(--color-primary); }
 .status_rejected { color: var(--color-danger); }
+.status_generating { color: var(--color-primary); }
+.status_generation_issue { color: var(--color-danger); }
+.status_no_email { color: var(--color-text-muted); }
 
 .dialogOverlay {
   position: fixed;

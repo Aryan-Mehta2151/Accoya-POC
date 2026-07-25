@@ -1,9 +1,12 @@
 import type {
   ChatMessage,
   ChatResponse,
+  CsvUploadResult,
   Email,
+  EmailGenerationJob,
   EmailStatus,
   Lead,
+  LeadWorkspace,
   StrategyDocument,
   SyncResult,
 } from '../types';
@@ -136,12 +139,20 @@ export const api = {
   uploadLeadsCsv: (file: File) => {
     const data = new FormData();
     data.append('file', file);
-    return request<Lead[]>('/leads/upload-csv', { method: 'POST', body: data });
+    return request<CsvUploadResult>('/leads/upload-csv', { method: 'POST', body: data });
   },
+  getLeadWorkspace: (leadId: string) =>
+    request<LeadWorkspace>(`/leads/${encodeURIComponent(leadId)}/workspace`),
+  queueEmailGeneration: (leadId: string, idempotencyKey: string) =>
+    request<EmailGenerationJob>(`/leads/${encodeURIComponent(leadId)}/email-generations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    }),
 
   listEmails: () => request<Email[]>('/emails'),
-  generateEmail: (leadId: string) =>
-    request<Email>(`/emails/generate/${encodeURIComponent(leadId)}`, { method: 'POST' }),
+  getEmail: (emailId: string) =>
+    request<Email>(`/emails/${encodeURIComponent(emailId)}`),
   editEmail: (emailId: string, payload: { subject?: string; body?: string }) =>
     request<Email>(`/emails/${encodeURIComponent(emailId)}`, {
       method: 'PATCH',

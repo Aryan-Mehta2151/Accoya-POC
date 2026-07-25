@@ -4,7 +4,6 @@ import {
   Bot,
   ChevronLeft,
   LayoutDashboard,
-  MailCheck,
   Menu,
   PanelLeft,
   Sparkles,
@@ -21,7 +20,6 @@ import styles from './AppShell.module.css';
 const NAV_ITEMS = [
   { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
   { to: '/opportunities', label: 'Opportunities', icon: Target },
-  { to: '/outreach', label: 'Outreach', icon: MailCheck },
   { to: '/knowledge', label: 'Knowledge Base', icon: BookOpenText },
   { to: '/assistant', label: 'Assistant', icon: Bot },
 ];

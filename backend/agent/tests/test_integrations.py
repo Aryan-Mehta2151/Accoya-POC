@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from agent.integrations import (
     BedrockStrategyRetriever,
@@ -148,6 +148,50 @@ class BedrockStrategyRetrieverTests(unittest.TestCase):
 
 
 class GeminiStructuredModelTests(unittest.TestCase):
+    def test_request_timeout_is_validated_and_forwarded(self):
+        with self.assertRaisesRegex(ValueError, "timeout must be positive"):
+            GeminiStructuredModel(
+                model_name="fake-model",
+                api_key="fake-key",
+                request_timeout_seconds=0,
+            )
+
+        llm = MagicMock()
+        runnable = MagicMock()
+        runnable.invoke.return_value = {
+            "parsed": EmailDraft(
+                subject="Subject",
+                body="Body",
+                selected_product_family="Decking",
+                selected_application="Standard decking",
+            ),
+            "raw": None,
+        }
+        llm.with_structured_output.return_value = runnable
+        model = GeminiStructuredModel(
+            model_name="fake-model",
+            api_key="fake-key",
+            request_timeout_seconds=12.5,
+        )
+
+        with patch(
+            "agent.integrations.ChatGoogleGenerativeAI",
+            return_value=llm,
+        ) as constructor:
+            model.invoke_structured(
+                EmailDraft,
+                system_prompt="system",
+                user_prompt="user",
+                temperature=0.1,
+            )
+
+        constructor.assert_called_once_with(
+            model="fake-model",
+            google_api_key="fake-key",
+            temperature=0.1,
+            request_timeout=12.5,
+        )
+
     def test_setup_errors_are_wrapped_as_model_invocation_errors(self):
         model = GeminiStructuredModel(model_name="fake-model", api_key="fake-key")
         with patch(

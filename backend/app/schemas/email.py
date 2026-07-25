@@ -18,6 +18,7 @@ class EmailRead(BaseModel):
 
     id: str
     lead_id: str
+    recipient_email: str | None = None
     subject: EmailSubject
     body: str
     status: EmailStatus

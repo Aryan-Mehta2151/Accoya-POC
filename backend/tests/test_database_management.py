@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 from sqlalchemy import create_engine, text
 
 from app.db import bootstrap, database
-from app.db.models import AgentRun
+from app.db.models import AgentRun, EmailGenerationJob
 
 
 class SchemaValidationTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class SchemaValidationTests(unittest.TestCase):
 
     def test_missing_revision_is_rejected_and_head_is_accepted(self) -> None:
         expected_heads = database.get_expected_schema_heads()
-        self.assertEqual(expected_heads, ("0002_agent_run_pagination_index",))
+        self.assertEqual(expected_heads, ("0004_email_generation_queue",))
 
         with patch.object(database, "engine", self.engine):
             with self.assertRaisesRegex(RuntimeError, "not at the required"):
@@ -68,6 +68,49 @@ class SchemaValidationTests(unittest.TestCase):
         self.assertEqual(
             [column.name for column in pagination_index.columns],
             ["started_at", "id"],
+        )
+
+    def test_email_generation_job_metadata_enforces_queue_invariants(self) -> None:
+        table = EmailGenerationJob.__table__
+
+        self.assertEqual(table.c.status.default.arg.value, "queued")
+        self.assertEqual(str(table.c.status.server_default.arg), "queued")
+        self.assertEqual(table.c.attempt_count.default.arg, 0)
+        self.assertEqual(str(table.c.attempt_count.server_default.arg), "0")
+        self.assertTrue(table.c.idempotency_key.unique is None)
+
+        idempotency_constraint = next(
+            constraint
+            for constraint in table.constraints
+            if constraint.name == "uq_email_generation_jobs_idempotency_key"
+        )
+        self.assertEqual(
+            [column.name for column in idempotency_constraint.columns],
+            ["idempotency_key"],
+        )
+
+        active_index = next(
+            index
+            for index in table.indexes
+            if index.name == "ix_email_generation_jobs_one_active_per_lead"
+        )
+        self.assertTrue(active_index.unique)
+        self.assertEqual(
+            [column.name for column in active_index.columns],
+            ["lead_id"],
+        )
+        self.assertIn(
+            "status IN ('queued', 'running')",
+            str(active_index.dialect_options["postgresql"]["where"]),
+        )
+
+        job_link = AgentRun.__table__.c.email_generation_job_id
+        self.assertTrue(job_link.nullable)
+        self.assertTrue(
+            any(
+                constraint.name == "uq_agent_runs_email_generation_job_id"
+                for constraint in AgentRun.__table__.constraints
+            )
         )
 
 

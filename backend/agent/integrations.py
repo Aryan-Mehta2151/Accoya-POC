@@ -116,13 +116,22 @@ class UnavailableStructuredModel:
 class GeminiStructuredModel:
     """LangChain Gemini adapter with Pydantic structured output."""
 
-    def __init__(self, *, model_name: str, api_key: str) -> None:
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        api_key: str,
+        request_timeout_seconds: float | None = None,
+    ) -> None:
         if not model_name.strip():
             raise ValueError("GEMINI_MODEL is not configured")
         if not api_key.strip():
             raise ValueError("GEMINI_API_KEY is not configured")
+        if request_timeout_seconds is not None and request_timeout_seconds <= 0:
+            raise ValueError("Gemini request timeout must be positive")
         self._model_name = model_name.strip()
         self._api_key = api_key.strip()
+        self._request_timeout_seconds = request_timeout_seconds
 
     @classmethod
     def from_settings(cls, settings: Settings | None = None) -> "GeminiStructuredModel":
@@ -130,6 +139,7 @@ class GeminiStructuredModel:
         return cls(
             model_name=configured.gemini_model,
             api_key=configured.gemini_api_key,
+            request_timeout_seconds=configured.gemini_request_timeout_seconds,
         )
 
     @property
@@ -149,6 +159,7 @@ class GeminiStructuredModel:
                 model=self._model_name,
                 google_api_key=self._api_key,
                 temperature=temperature,
+                request_timeout=self._request_timeout_seconds,
             )
             runnable = llm.with_structured_output(schema, include_raw=True)
             response = self._invoke_with_retry(

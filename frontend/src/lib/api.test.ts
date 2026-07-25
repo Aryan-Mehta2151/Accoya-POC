@@ -44,9 +44,9 @@ describe('API client', () => {
     expect(leads[0]).toMatchObject({ project: 'Riverside Pavilion', score: 92 });
   });
 
-  it('preserves friendly generation details and warnings', async () => {
+  it('preserves friendly generation queue errors and warnings', async () => {
     server.use(
-      http.post(`${base}/emails/generate/lead-1`, () => HttpResponse.json(
+      http.post(`${base}/leads/lead-1/email-generations`, () => HttpResponse.json(
         {
           code: 'insufficient_context',
           message: 'The lead needs more context.',
@@ -56,7 +56,10 @@ describe('API client', () => {
       )),
     );
 
-    const error = await api.generateEmail('lead-1').catch((caught: unknown) => caught);
+    const error = await api.queueEmailGeneration(
+      'lead-1',
+      '00000000-0000-4000-8000-000000000001',
+    ).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({
       status: 422,

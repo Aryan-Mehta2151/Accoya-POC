@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import threading
 import unittest
+import uuid
 from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, Callable
@@ -34,12 +35,20 @@ from app.db.models import (
     AgentRun,
     AgentRunStatus,
     Email,
+    EmailGenerationJob,
+    EmailGenerationJobStatus,
+    EmailGenerationTrigger,
     EmailStatus,
     EmailStatusEvent,
     Lead,
 )
 from app.schemas.email import EmailStatusUpdate
-from app.services import agent_run_service, email_generator, lead_feed_service
+from app.services import (
+    agent_run_service,
+    email_generation_service,
+    email_generator,
+    lead_feed_service,
+)
 
 
 TEST_DATABASE_URL = os.getenv("ACCOYA_TEST_DATABASE_URL")
@@ -144,11 +153,12 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
 
     @classmethod
     def _clean_agent_rows(cls) -> None:
-        """Delete only the four agent-subsystem tables in dependency order."""
+        """Delete only agent-subsystem tables in dependency order."""
         with cls.engine.begin() as connection:
             connection.execute(EmailStatusEvent.__table__.delete())
             connection.execute(Email.__table__.delete())
             connection.execute(AgentRun.__table__.delete())
+            connection.execute(EmailGenerationJob.__table__.delete())
             connection.execute(Lead.__table__.delete())
 
     def _get_db(self):
@@ -207,12 +217,31 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
         agent_run_indexes = {
             index["name"]: index for index in inspector.get_indexes("agent_runs")
         }
+        job_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("email_generation_jobs")
+        }
+        job_indexes = {
+            index["name"]: index
+            for index in inspector.get_indexes("email_generation_jobs")
+        }
         self.assertEqual(agent_run_columns["model_calls"]["default"], "0")
         self.assertEqual(agent_run_columns["retrieval_count"]["default"], "0")
         self.assertEqual(
             agent_run_indexes["ix_agent_runs_started_at_id"]["column_names"],
             ["started_at", "id"],
         )
+        self.assertEqual(job_columns["attempt_count"]["default"], "0")
+        active_index = job_indexes[
+            "ix_email_generation_jobs_one_active_per_lead"
+        ]
+        self.assertTrue(active_index["unique"])
+        self.assertEqual(active_index["column_names"], ["lead_id"])
+        self.assertIn(
+            "status",
+            str(active_index.get("dialect_options", {})).casefold(),
+        )
+        self.assertIn("email_generation_job_id", agent_run_columns)
 
         command.check(database.make_alembic_config(TEST_DATABASE_URL))
 
@@ -245,6 +274,98 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
                 db.scalar(select(func.count()).select_from(Lead)),
                 2,
             )
+
+    def test_concurrent_ingestion_queues_one_initial_job(self):
+        row = {
+            "id": "concurrent-ingestion-lead",
+            "Project": "Concurrent Boardwalk",
+            "Location": "Sacramento, California",
+            "Contacts": "Alex Rivera, alex@example.test",
+        }
+        barrier = threading.Barrier(2)
+        results: list[tuple[int, int, int]] = []
+        errors: list[BaseException] = []
+
+        def ingest() -> None:
+            try:
+                with self.session_factory() as db:
+                    created_leads: list[Lead] = []
+                    barrier.wait(timeout=5)
+                    _, created, updated = lead_feed_service.upsert_feed_rows(
+                        db,
+                        [row],
+                        source_feed="postgres/concurrent-feed",
+                        identity_scope="postgres-concurrent-scope",
+                        created_leads=created_leads,
+                    )
+                    db.flush()
+                    jobs = email_generation_service.enqueue_initial_generations(
+                        db,
+                        created_leads,
+                        trigger=EmailGenerationTrigger.earlybid_sync,
+                    )
+                    db.commit()
+                    results.append((created, updated, len(jobs)))
+            except BaseException as exc:
+                errors.append(exc)
+
+        workers = [threading.Thread(target=ingest, daemon=True) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=10)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(errors, [])
+        self.assertCountEqual(results, [(1, 0, 1), (0, 1, 0)])
+        with self.session_factory() as db:
+            self.assertEqual(db.scalar(select(func.count()).select_from(Lead)), 1)
+            self.assertEqual(
+                db.scalar(select(func.count()).select_from(EmailGenerationJob)),
+                1,
+            )
+
+    def test_concurrent_manual_submissions_return_one_active_job(self):
+        lead_id = self._seed_normalized_lead("concurrent-manual-lead")
+        key = str(uuid.uuid4())
+        barrier = threading.Barrier(2)
+        job_ids: list[str] = []
+        errors: list[BaseException] = []
+
+        def enqueue() -> None:
+            try:
+                with self.session_factory() as db:
+                    barrier.wait(timeout=5)
+                    job = email_generation_service.enqueue_generation(
+                        db,
+                        lead_id=lead_id,
+                        idempotency_key=key,
+                    )
+                    job_ids.append(job.id)
+            except BaseException as exc:
+                errors.append(exc)
+
+        workers = [threading.Thread(target=enqueue, daemon=True) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=10)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(job_ids), 2)
+        self.assertEqual(len(set(job_ids)), 1)
+        with self.session_factory() as db:
+            self.assertEqual(
+                db.scalar(
+                    select(func.count())
+                    .select_from(EmailGenerationJob)
+                    .where(EmailGenerationJob.lead_id == lead_id)
+                ),
+                1,
+            )
+            self.assertEqual(db.scalar(select(func.count()).select_from(AgentRun)), 0)
+            self.assertEqual(db.scalar(select(func.count()).select_from(Email)), 0)
 
     def test_run_lifecycle_commits_running_and_persists_all_outcomes(self):
         lead_id = self._seed_normalized_lead()
@@ -324,32 +445,83 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
             self.assertEqual(email.subject, generated.original_subject)
             self.assertEqual(event.new_status, EmailStatus.pending_review)
 
-    def test_facade_retry_hash_audit_and_cursor_pagination(self):
+    def test_queue_retry_hash_audit_and_cursor_pagination(self):
         lead_id = self._seed_normalized_lead()
-        self.agent.subject = "Facade subject " + ("z" * 700)
-        generated = self.client.post(f"/api/emails/generate/{lead_id}")
-        self.assertEqual(generated.status_code, 200)
-        self.assertEqual(generated.json()["subject"], self.agent.subject)
-        email_id = generated.json()["id"]
+        self.agent.subject = "Queue subject " + ("z" * 700)
+        with self.session_factory() as db:
+            first_job = email_generation_service.enqueue_generation(
+                db,
+                lead_id=lead_id,
+                idempotency_key=str(uuid.uuid4()),
+            )
+            first_job_id = first_job.id
+            first_requested_hash = first_job.requested_input_hash
+        with self.session_factory() as db:
+            first_claim = email_generation_service.claim_next_job(
+                db,
+                worker_id="postgres-worker-1",
+            )
+        with self.session_factory() as db:
+            email_generation_service.execute_claimed_job(
+                db,
+                claim=first_claim,
+                agent=self.agent,
+            )
 
         with self.session_factory() as db:
-            first_run = db.scalar(select(AgentRun))
+            persisted_first_job = db.get(EmailGenerationJob, first_job_id)
+            first_run = persisted_first_job.agent_run
             first_run_id = first_run.id
             first_hash = first_run.input_hash
             original_subject = first_run.original_subject
+            email_id = first_run.email.id
             lead = db.get(Lead, lead_id)
             lead.summary = "Changed current projection for retry hashing."
             db.commit()
 
         self.agent.subject = "Retry draft"
-        retry = self.client.post(f"/api/agent-runs/{first_run_id}/retry")
-        self.assertEqual(retry.status_code, 201)
-        self.assertEqual(retry.json()["retry_of_run_id"], first_run_id)
-        self.assertNotEqual(retry.json()["input_hash"], first_hash)
+        with self.session_factory() as db:
+            retry_job = email_generation_service.enqueue_generation(
+                db,
+                lead_id=lead_id,
+                idempotency_key=str(uuid.uuid4()),
+            )
+            retry_job_id = retry_job.id
+            self.assertEqual(retry_job.retry_of_job_id, first_job_id)
+            self.assertNotEqual(retry_job.requested_input_hash, first_requested_hash)
+        with self.session_factory() as db:
+            retry_claim = email_generation_service.claim_next_job(
+                db,
+                worker_id="postgres-worker-2",
+            )
+        with self.session_factory() as db:
+            email_generation_service.execute_claimed_job(
+                db,
+                claim=retry_claim,
+                agent=self.agent,
+            )
 
-        repeated = self.client.post("/api/agent-runs", json={"lead_id": lead_id})
-        self.assertEqual(repeated.status_code, 201)
-        self.assertNotEqual(repeated.json()["id"], retry.json()["id"])
+        with self.session_factory() as db:
+            retry_run = db.get(EmailGenerationJob, retry_job_id).agent_run
+            self.assertEqual(retry_run.retry_of_run_id, first_run_id)
+            self.assertNotEqual(retry_run.input_hash, first_hash)
+
+            third_job = email_generation_service.enqueue_generation(
+                db,
+                lead_id=lead_id,
+                idempotency_key=str(uuid.uuid4()),
+            )
+        with self.session_factory() as db:
+            third_claim = email_generation_service.claim_next_job(
+                db,
+                worker_id="postgres-worker-3",
+            )
+        with self.session_factory() as db:
+            email_generation_service.execute_claimed_job(
+                db,
+                claim=third_claim,
+                agent=self.agent,
+            )
 
         first_page = self.client.get(
             "/api/agent-runs",
@@ -396,10 +568,62 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
             self.assertEqual(transition.actor, "postgres-reviewer")
 
 
+    def test_claim_skips_a_queue_row_locked_by_another_worker(self):
+        first_lead = self._seed_normalized_lead("skip-locked-first")
+        second_lead = self._seed_normalized_lead("skip-locked-second")
+        for lead_id in (first_lead, second_lead):
+            with self.session_factory() as db:
+                email_generation_service.enqueue_generation(
+                    db,
+                    lead_id=lead_id,
+                    idempotency_key=str(uuid.uuid4()),
+                )
+
+        with self.session_factory() as locking_db:
+            first_job_id = locking_db.scalar(
+                select(EmailGenerationJob.id)
+                .where(
+                    EmailGenerationJob.status
+                    == EmailGenerationJobStatus.queued
+                )
+                .order_by(
+                    EmailGenerationJob.queued_at,
+                    EmailGenerationJob.id,
+                )
+                .limit(1)
+            )
+            locked = locking_db.scalar(
+                select(EmailGenerationJob)
+                .where(EmailGenerationJob.id == first_job_id)
+                .with_for_update()
+            )
+            self.assertIsNotNone(locked)
+
+            with self.session_factory() as competing_db:
+                claim = email_generation_service.claim_next_job(
+                    competing_db,
+                    worker_id="skip-locked-worker",
+                )
+
+            self.assertIsNotNone(claim)
+            self.assertNotEqual(claim.job_id, first_job_id)
+            locking_db.rollback()
+
+        with self.session_factory() as db:
+            first_job = db.get(EmailGenerationJob, first_job_id)
+            claimed_job = db.get(EmailGenerationJob, claim.job_id)
+            self.assertEqual(first_job.status, EmailGenerationJobStatus.queued)
+            self.assertEqual(claimed_job.status, EmailGenerationJobStatus.running)
+
     def test_concurrent_status_transitions_keep_a_contiguous_event_chain(self):
         lead_id = self._seed_normalized_lead("concurrent-status-lead")
-        generated = self.client.post("/api/agent-runs", json={"lead_id": lead_id})
-        self.assertEqual(generated.status_code, 201)
+        with self.session_factory() as db:
+            generated = agent_run_service.execute_agent_run(
+                db,
+                lead_id=lead_id,
+                agent=self.agent,
+            )
+        self.assertEqual(generated.status, AgentRunStatus.generated)
 
         with self.session_factory() as lookup:
             email_id = lookup.scalar(select(Email.id))

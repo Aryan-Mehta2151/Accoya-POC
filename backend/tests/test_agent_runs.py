@@ -250,13 +250,17 @@ class AgentRunTests(unittest.TestCase):
                 2,
             )
 
-    def test_run_api_paginates_and_system_errors_return_safe_run_id(self):
+    def test_run_read_api_paginates_and_mutation_adapters_queue(self):
         lead_id = self._seed_lead()
         created_ids: list[str] = []
-        for _ in range(3):
-            response = self.client.post("/api/agent-runs", json={"lead_id": lead_id})
-            self.assertEqual(response.status_code, 201)
-            created_ids.append(response.json()["id"])
+        with self.session_factory() as db:
+            for _ in range(3):
+                run = agent_run_service.execute_agent_run(
+                    db,
+                    lead_id=lead_id,
+                    agent=self.agent,
+                )
+                created_ids.append(run.id)
 
         first_page = self.client.get("/api/agent-runs", params={"limit": 2})
         self.assertEqual(first_page.status_code, 200)
@@ -272,33 +276,28 @@ class AgentRunTests(unittest.TestCase):
         self.assertIsNone(second_page.json()["next_cursor"])
 
         retry = self.client.post(f"/api/agent-runs/{created_ids[0]}/retry")
-        self.assertEqual(retry.status_code, 201)
-        self.assertEqual(retry.json()["retry_of_run_id"], created_ids[0])
+        self.assertEqual(retry.status_code, 202)
+        self.assertEqual(retry.json()["trigger"], "retry")
+        self.assertEqual(retry.json()["status"], "queued")
+        self.assertEqual(len(self.agent.calls), 3)
 
-        self.agent.status = GenerationStatus.PROVIDER_ERROR
-        provider_failure = self.client.post(
+        compatibility = self.client.post(
             "/api/agent-runs",
             json={"lead_id": lead_id},
         )
-        self.assertEqual(provider_failure.status_code, 201)
-        self.assertEqual(provider_failure.json()["status"], "provider_error")
-
-        self.agent.status = GenerationStatus.GENERATED
-        self.agent.error = RuntimeError("secret upstream exception")
-        failed = self.client.post("/api/agent-runs", json={"lead_id": lead_id})
-        self.assertEqual(failed.status_code, 500)
-        self.assertEqual(failed.json()["code"], "agent_execution_failed")
-        self.assertIn("run_id", failed.json())
-        self.assertNotIn("secret upstream", failed.text)
-        persisted = self.client.get(f"/api/agent-runs/{failed.json()['run_id']}")
-        self.assertEqual(persisted.status_code, 200)
-        self.assertEqual(persisted.json()["status"], "system_error")
+        self.assertEqual(compatibility.status_code, 202)
+        self.assertEqual(compatibility.json()["id"], retry.json()["id"])
+        self.assertEqual(len(self.agent.calls), 3)
 
     def test_email_edits_and_status_events_do_not_change_original_draft(self):
         lead_id = self._seed_lead()
-        generated = self.client.post("/api/agent-runs", json={"lead_id": lead_id})
-        self.assertEqual(generated.status_code, 201)
-        run_id = generated.json()["id"]
+        with self.session_factory() as db:
+            generated = agent_run_service.execute_agent_run(
+                db,
+                lead_id=lead_id,
+                agent=self.agent,
+            )
+            run_id = generated.id
         with self.session_factory() as db:
             email = db.scalar(select(Email).where(Email.agent_run_id == run_id))
             email_id = email.id

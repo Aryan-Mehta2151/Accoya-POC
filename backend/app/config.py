@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     # Gemini
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+    gemini_request_timeout_seconds: float = 180.0
+
+    # Durable outreach-generation worker
+    email_generation_worker_poll_seconds: float = 2.0
+    email_generation_heartbeat_seconds: float = 15.0
+    email_generation_stale_seconds: float = 300.0
 
     # Lead source API (EarlyBid feed)
     lead_api_base_url: str = "https://api.earlybid.bid"

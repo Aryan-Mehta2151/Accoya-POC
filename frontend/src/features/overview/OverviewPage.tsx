@@ -11,7 +11,24 @@ import { ErrorState, LoadingState, PageHeader, StatusBadge } from '../../compone
 import { api } from '../../lib/api';
 import { formatDate, formatLocation, formatScore } from '../../lib/format';
 import { queryKeys } from '../../lib/queryKeys';
+import type { Email } from '../../types';
 import styles from './overview.module.css';
+
+function newestEmailsByLead(emails: Email[]): Email[] {
+  const newest = new Map<string, Email>();
+  for (const email of emails) {
+    const current = newest.get(email.lead_id);
+    if (!current) {
+      newest.set(email.lead_id, email);
+      continue;
+    }
+    const createdComparison = email.created_at.localeCompare(current.created_at);
+    if (createdComparison > 0 || (createdComparison === 0 && email.id.localeCompare(current.id) > 0)) {
+      newest.set(email.lead_id, email);
+    }
+  }
+  return [...newest.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+}
 
 export function OverviewPage() {
   const leadsQuery = useQuery({ queryKey: queryKeys.leads, queryFn: api.listLeads });
@@ -39,10 +56,11 @@ export function OverviewPage() {
   const leads = leadsQuery.data ?? [];
   const emails = emailsQuery.data ?? [];
   const documents = documentsQuery.data ?? [];
-  const pending = emails.filter((email) => email.status === 'pending_review');
-  const approved = emails.filter((email) => email.status === 'approved');
+  const currentEmails = newestEmailsByLead(emails);
+  const pending = currentEmails.filter((email) => email.status === 'pending_review');
+  const approved = currentEmails.filter((email) => email.status === 'approved');
   const topLeads = leads.slice(0, 5);
-  const recentEmails = emails.slice(0, 5);
+  const recentEmails = currentEmails.slice(0, 5);
 
   return (
     <div>
@@ -106,14 +124,18 @@ export function OverviewPage() {
               <p>Latest work</p>
               <h2>Recent outreach</h2>
             </div>
-            <Link to='/outreach'>Review queue <ArrowRight aria-hidden='true' /></Link>
+            <Link to='/opportunities?outreach=pending_review'>Review queue <ArrowRight aria-hidden='true' /></Link>
           </div>
           {recentEmails.length > 0 ? (
             <div className={styles.emailList}>
               {recentEmails.map((email) => {
                 const lead = leads.find((item) => item.id === email.lead_id);
                 return (
-                  <Link className={styles.emailRow} to={`/outreach/${email.id}`} key={email.id}>
+                  <Link
+                    className={styles.emailRow}
+                    to={`/opportunities/${encodeURIComponent(email.lead_id)}?email=${encodeURIComponent(email.id)}`}
+                    key={email.id}
+                  >
                     <span className={styles.emailCopy}>
                       <strong>{email.subject}</strong>
                       <span>{lead?.project ?? 'Opportunity'} · {formatDate(email.updated_at)}</span>

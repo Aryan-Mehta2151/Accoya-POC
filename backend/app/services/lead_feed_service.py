@@ -7,6 +7,7 @@ result to the current lead projection and applies the source-scoped upsert.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 from collections.abc import Iterable, Mapping
@@ -14,12 +15,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, text as sql_text
 from sqlalchemy.orm import Session
 
 from agent.normalization import EARLYBID_NATURAL_ID_PREFIX, normalize_lead
 from app.config import get_settings
-from app.db.models import Lead
+from app.db.models import EmailGenerationTrigger, Lead
+from app.services.email_generation_service import enqueue_initial_generations
 
 settings = get_settings()
 EARLYBID_SOURCE_SYSTEM = "earlybid"
@@ -181,6 +183,7 @@ def upsert_feed_rows(
     source_feed: str,
     source_system: str = EARLYBID_SOURCE_SYSTEM,
     identity_scope: str | None = None,
+    created_leads: list[Lead] | None = None,
 ) -> tuple[list[Lead], int, int]:
     """Validate, stage, and upsert a complete source-scoped feed."""
     source_system = source_system.strip()
@@ -236,6 +239,12 @@ def upsert_feed_rows(
     if not prepared:
         return [], 0, 0
 
+    _lock_source_scope(
+        db,
+        source_system=source_system,
+        identity_scope=identity_scope or source_feed,
+    )
+
     existing_leads = db.scalars(
         select(Lead).where(
             Lead.source_system == source_system,
@@ -252,6 +261,8 @@ def upsert_feed_rows(
         if lead is None:
             lead = Lead(**fields)
             db.add(lead)
+            if created_leads is not None:
+                created_leads.append(lead)
             created += 1
         else:
             for attr, value in fields.items():
@@ -265,16 +276,52 @@ def sync_feed(db: Session, reseller: str, client: str) -> dict[str, int | str]:
     """Pull and upsert the current EarlyBid lead projection."""
     source_feed = f"{reseller}/{client}"
     rows = parse_feed_csv(fetch_latest_csv(reseller, client))
-    _, created, updated = upsert_feed_rows(
-        db,
-        rows,
-        source_feed=source_feed,
-        identity_scope=earlybid_identity_scope(reseller, client),
-    )
-    db.commit()
+    created_leads: list[Lead] = []
+    try:
+        _, created, updated = upsert_feed_rows(
+            db,
+            rows,
+            source_feed=source_feed,
+            identity_scope=earlybid_identity_scope(reseller, client),
+            created_leads=created_leads,
+        )
+        db.flush()
+        jobs = enqueue_initial_generations(
+            db,
+            created_leads,
+            trigger=EmailGenerationTrigger.earlybid_sync,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     return {
         "created": created,
         "updated": updated,
         "total": len(rows),
         "feed": source_feed,
+        "generation_queued": len(jobs),
     }
+
+
+def _lock_source_scope(
+    db: Session,
+    *,
+    source_system: str,
+    identity_scope: str,
+) -> None:
+    """Serialize one PostgreSQL ingestion scope for race-free create detection."""
+
+    bind = db.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    material = f"{source_system}\0{identity_scope}".encode("utf-8")
+    lock_key = int.from_bytes(
+        hashlib.sha256(material).digest()[:8],
+        byteorder="big",
+        signed=True,
+    )
+    db.execute(
+        sql_text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": lock_key},
+    )

@@ -19,6 +19,8 @@ export type Lead = {
   url: string | null;
   source_feed: string | null;
   created_at: string;
+  current_email?: EmailSummary | null;
+  latest_generation?: EmailGenerationJob | null;
 };
 
 export type SyncResult = {
@@ -26,6 +28,15 @@ export type SyncResult = {
   updated: number;
   total: number;
   feed: string;
+  generation_queued: number;
+};
+
+export type CsvUploadResult = {
+  items: Lead[];
+  created: number;
+  updated: number;
+  total: number;
+  generation_queued: number;
 };
 
 export type EmailStatus =
@@ -38,11 +49,59 @@ export type EmailStatus =
 export type Email = {
   id: string;
   lead_id: string;
+  recipient_email: string | null;
   subject: string;
   body: string;
   status: EmailStatus;
   created_at: string;
   updated_at: string;
+};
+
+export type EmailSummary = {
+  id: string;
+  status: EmailStatus;
+  recipient_email: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type EmailGenerationJobStatus =
+  | 'queued'
+  | 'running'
+  | 'generated'
+  | 'insufficient_context'
+  | 'provider_error'
+  | 'system_error';
+
+export type EmailGenerationTrigger =
+  | 'earlybid_sync'
+  | 'csv_upload'
+  | 'manual'
+  | 'retry';
+
+export type EmailGenerationJob = {
+  id: string;
+  lead_id: string;
+  retry_of_job_id: string | null;
+  agent_run_id: string | null;
+  trigger: EmailGenerationTrigger;
+  status: EmailGenerationJobStatus;
+  requested_input_hash: string;
+  idempotency_key: string;
+  error_code: string | null;
+  attempt_count: number;
+  queued_at: string;
+  claimed_at: string | null;
+  heartbeat_at: string | null;
+  completed_at: string | null;
+};
+
+export type LeadWorkspace = {
+  lead: Lead;
+  emails: Email[];
+  current_email_id: string | null;
+  current_email_is_stale: boolean;
+  latest_generation: EmailGenerationJob | null;
 };
 
 export type StrategyDocument = {

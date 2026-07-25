@@ -15,9 +15,13 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.routes import leads
 from app.db.database import Base, get_db
-from app.db.models import Lead
+from app.db.models import EmailGenerationJob, EmailGenerationTrigger, Lead
 from app.schemas.lead import LeadRead
-from app.services import lead_feed_service
+from app.services import (
+    email_generation_service,
+    email_generator,
+    lead_feed_service,
+)
 from app.services.lead_feed_service import (
     LeadFeedValidationError,
     earlybid_identity_scope,
@@ -266,6 +270,15 @@ class LeadIngestionApiTests(unittest.TestCase):
         with self.session_factory() as db:
             return db.scalar(select(func.count()).select_from(Lead)) or 0
 
+    def _job_count(self) -> int:
+        with self.session_factory() as db:
+            return (
+                db.scalar(
+                    select(func.count()).select_from(EmailGenerationJob)
+                )
+                or 0
+            )
+
     def test_idless_upload_is_filename_independent_and_updates_mutable_fields(self):
         first_csv = (
             "Project,Location,State,Score,Next Step\n"
@@ -277,9 +290,13 @@ class LeadIngestionApiTests(unittest.TestCase):
         )
         self.assertEqual(first.status_code, 200)
         first_payload = first.json()
-        self.assertEqual(len(first_payload), 1)
-        lead_uuid = first_payload[0]["id"]
-        external_id = first_payload[0]["external_id"]
+        self.assertEqual(len(first_payload["items"]), 1)
+        self.assertEqual(first_payload["created"], 1)
+        self.assertEqual(first_payload["updated"], 0)
+        self.assertEqual(first_payload["total"], 1)
+        self.assertEqual(first_payload["generation_queued"], 1)
+        lead_uuid = first_payload["items"][0]["id"]
+        external_id = first_payload["items"][0]["external_id"]
 
         second_csv = (
             "Project,Location,State,Score,Next Step\n"
@@ -291,18 +308,28 @@ class LeadIngestionApiTests(unittest.TestCase):
         )
 
         self.assertEqual(second.status_code, 200)
-        self.assertEqual(second.json()[0]["id"], lead_uuid)
-        self.assertEqual(second.json()[0]["external_id"], external_id)
+        second_payload = second.json()
+        self.assertEqual(second_payload["items"][0]["id"], lead_uuid)
+        self.assertEqual(
+            second_payload["items"][0]["external_id"], external_id
+        )
+        self.assertEqual(second_payload["created"], 0)
+        self.assertEqual(second_payload["updated"], 1)
+        self.assertEqual(second_payload["generation_queued"], 0)
         self.assertTrue(external_id.startswith("earlybid-natural-v1:"))
         self.assertEqual(self._lead_count(), 1)
+        self.assertEqual(self._job_count(), 1)
         with self.session_factory() as db:
             persisted = db.scalar(select(Lead))
+            job = db.scalar(select(EmailGenerationJob))
             self.assertEqual(persisted.score, 10)
             self.assertEqual(persisted.next_step, "Review the specification")
             self.assertEqual(persisted.source_feed, "upload:renamed.csv")
             self.assertEqual(persisted.raw_data["Score"], "10")
             self.assertNotIn("id", persisted.raw_data)
             self.assertNotIn("external_id", persisted.raw_data)
+            self.assertEqual(job.trigger, EmailGenerationTrigger.csv_upload)
+            self.assertEqual(job.idempotency_key, f"initial-v1:{lead_uuid}")
 
     def test_upload_returns_422_and_stages_nothing_for_an_invalid_row(self):
         csv_text = (
@@ -326,6 +353,7 @@ class LeadIngestionApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(self._lead_count(), 0)
+        self.assertEqual(self._job_count(), 0)
 
     def test_upload_returns_422_for_a_conflicting_derived_identity(self):
         csv_text = (
@@ -348,6 +376,26 @@ class LeadIngestionApiTests(unittest.TestCase):
             ],
         )
         self.assertEqual(self._lead_count(), 0)
+        self.assertEqual(self._job_count(), 0)
+
+    def test_upload_rolls_back_new_leads_when_queue_staging_fails(self):
+        csv_text = (
+            "Project,Location,State\n"
+            "Atomic Opportunity,Portland,OR\n"
+        )
+        with patch.object(
+            email_generation_service,
+            "enqueue_initial_generations",
+            side_effect=RuntimeError("queue unavailable"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "queue unavailable"):
+                self.client.post(
+                    "/api/leads/upload-csv",
+                    files={"file": ("atomic.csv", csv_text, "text/csv")},
+                )
+
+        self.assertEqual(self._lead_count(), 0)
+        self.assertEqual(self._job_count(), 0)
 
     def test_sync_maps_feed_validation_to_502(self):
         csv_text = "Project,Location,State\nMissing Location,,OR\n"
@@ -367,6 +415,7 @@ class LeadIngestionApiTests(unittest.TestCase):
             [{"row": 2, "reason": "invalid_natural_identity"}],
         )
         self.assertEqual(self._lead_count(), 0)
+        self.assertEqual(self._job_count(), 0)
 
     def test_repeated_sync_updates_the_same_idless_lead(self):
         first_csv = (
@@ -402,6 +451,7 @@ class LeadIngestionApiTests(unittest.TestCase):
                 "updated": 0,
                 "total": 1,
                 "feed": "reseller/client",
+                "generation_queued": 1,
             },
         )
         self.assertEqual(second.status_code, 200)
@@ -412,14 +462,50 @@ class LeadIngestionApiTests(unittest.TestCase):
                 "updated": 1,
                 "total": 1,
                 "feed": "reseller/client",
+                "generation_queued": 0,
             },
         )
         with self.session_factory() as db:
             persisted = db.scalar(select(Lead))
+            job = db.scalar(select(EmailGenerationJob))
             self.assertEqual(db.scalar(select(func.count()).select_from(Lead)), 1)
+            self.assertEqual(
+                db.scalar(
+                    select(func.count()).select_from(EmailGenerationJob)
+                ),
+                1,
+            )
             self.assertEqual(persisted.id, first_uuid)
             self.assertEqual(persisted.score, 10)
             self.assertEqual(persisted.next_step, "Review the specification")
+            self.assertEqual(job.trigger, EmailGenerationTrigger.earlybid_sync)
+
+    def test_sync_queues_without_instantiating_or_calling_the_agent(self):
+        csv_text = (
+            "Project,Location,State,Score\n"
+            "Queued Opportunity,Portland,OR,8\n"
+        )
+        with (
+            patch.object(
+                lead_feed_service,
+                "fetch_latest_csv",
+                return_value=csv_text,
+            ),
+            patch.object(
+                email_generator,
+                "get_accoya_email_agent",
+            ) as agent_factory,
+        ):
+            response = self.client.post(
+                "/api/leads/sync",
+                params={"reseller": "reseller", "client": "client"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["generation_queued"], 1)
+        agent_factory.assert_not_called()
+        self.assertEqual(self._lead_count(), 1)
+        self.assertEqual(self._job_count(), 1)
 
 
 class LeadWireCompatibilityTests(unittest.TestCase):

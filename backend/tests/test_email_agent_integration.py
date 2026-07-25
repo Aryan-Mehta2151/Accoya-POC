@@ -21,7 +21,7 @@ from app.api.routes import emails
 from app.config import get_settings
 from app.db.database import Base, get_db
 from app.db.models import AgentRun, AgentRunStatus, Email, EmailStatus, Lead
-from app.services import email_generator
+from app.services import agent_run_service, email_generator
 
 
 class FakeAgent:
@@ -146,19 +146,25 @@ class EmailAgentIntegrationTests(unittest.TestCase):
         with self.session_factory() as db:
             return db.scalar(select(func.count()).select_from(Email)) or 0
 
+    def _execute_for_lead(self, lead_id: str):
+        with self.session_factory() as db:
+            return agent_run_service.execute_agent_run(
+                db,
+                lead_id=lead_id,
+                agent=self.agent,
+            )
+
     def test_success_maps_only_allowlisted_fields_and_persists_long_subject(self):
         lead = self._seed_lead()
         long_subject = "Accoya " + ("x" * 700)
         self.agent.subject = long_subject
 
-        response = self.client.post(f"/api/emails/generate/{lead.id}")
+        run = self._execute_for_lead(lead.id)
 
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["lead_id"], lead.id)
-        self.assertEqual(payload["subject"], long_subject)
-        self.assertEqual(payload["body"], self.agent.body)
-        self.assertEqual(payload["status"], EmailStatus.pending_review.value)
+        self.assertEqual(run.lead_id, lead.id)
+        self.assertEqual(run.original_subject, long_subject)
+        self.assertEqual(run.original_body, self.agent.body)
+        self.assertEqual(run.status, AgentRunStatus.generated)
 
         self.assertEqual(len(self.agent.calls), 1)
         agent_lead = self.agent.calls[0]
@@ -210,9 +216,8 @@ class EmailAgentIntegrationTests(unittest.TestCase):
             raw_data={"Next Step": "Do not use raw input", "secret": "hidden"},
         )
 
-        response = self.client.post(f"/api/emails/generate/{lead.id}")
+        self._execute_for_lead(lead.id)
 
-        self.assertEqual(response.status_code, 200)
         self.assertEqual(
             self.agent.calls[0]["next_step"],
             "Use the normalized next step",
@@ -227,48 +232,42 @@ class EmailAgentIntegrationTests(unittest.TestCase):
         self.assertEqual(self.agent.calls, [])
         self.assertEqual(self._email_count(), 0)
 
-    def test_non_generated_statuses_return_structured_errors_without_rows(self):
+    def test_non_generated_statuses_persist_safe_runs_without_emails(self):
         lead = self._seed_lead()
         cases = (
             (
                 GenerationStatus.INSUFFICIENT_CONTEXT,
-                422,
-                "The lead does not contain enough context to generate an email.",
+                AgentRunStatus.insufficient_context,
             ),
             (
                 GenerationStatus.PROVIDER_ERROR,
-                502,
-                "The email generation provider could not produce a draft.",
+                AgentRunStatus.provider_error,
             ),
         )
-        for status, expected_code, expected_message in cases:
+        for status, expected_status in cases:
             with self.subTest(status=status):
                 self.agent.status = status
                 self.agent.warnings = ["safe warning"]
 
-                response = self.client.post(f"/api/emails/generate/{lead.id}")
+                run = self._execute_for_lead(lead.id)
 
-                self.assertEqual(response.status_code, expected_code)
-                self.assertEqual(
-                    response.json(),
-                    {
-                        "code": status.value,
-                        "message": expected_message,
-                        "warnings": ["safe warning"],
-                    },
-                )
+                self.assertEqual(run.status, expected_status)
+                self.assertEqual(run.error_code, expected_status.value)
+                self.assertEqual(run.warnings, ["safe warning"])
                 self.assertEqual(self._email_count(), 0)
 
-    def test_repeated_generation_creates_separate_review_rows(self):
+    def test_deprecated_facade_only_queues_and_reuses_active_work(self):
         lead = self._seed_lead()
 
         first = self.client.post(f"/api/emails/generate/{lead.id}")
         second = self.client.post(f"/api/emails/generate/{lead.id}")
 
-        self.assertEqual(first.status_code, 200)
-        self.assertEqual(second.status_code, 200)
-        self.assertNotEqual(first.json()["id"], second.json()["id"])
-        self.assertEqual(self._email_count(), 2)
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202)
+        self.assertEqual(first.json()["id"], second.json()["id"])
+        self.assertEqual(first.json()["status"], "queued")
+        self.assertEqual(self.agent.calls, [])
+        self.assertEqual(self._email_count(), 0)
 
     def test_missing_contact_email_does_not_block_generation(self):
         lead = self._seed_lead(
@@ -277,16 +276,19 @@ class EmailAgentIntegrationTests(unittest.TestCase):
             contacts=None,
         )
 
-        response = self.client.post(f"/api/emails/generate/{lead.id}")
+        run = self._execute_for_lead(lead.id)
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(run.status, AgentRunStatus.generated)
         self.assertIsNone(self.agent.calls[0]["contact_email"])
         self.assertEqual(self._email_count(), 1)
 
     def test_email_edit_rejects_a_blank_subject_without_a_length_cap(self):
         lead = self._seed_lead()
-        generated = self.client.post(f"/api/emails/generate/{lead.id}")
-        email_id = generated.json()["id"]
+        run = self._execute_for_lead(lead.id)
+        with self.session_factory() as db:
+            email_id = db.scalar(
+                select(Email.id).where(Email.agent_run_id == run.id)
+            )
 
         blank = self.client.patch(
             f"/api/emails/{email_id}",
@@ -306,17 +308,16 @@ class EmailAgentIntegrationTests(unittest.TestCase):
         lead = self._seed_lead()
         self.agent.error = RuntimeError("provider secret should not be returned")
 
-        response = self.client.post(f"/api/emails/generate/{lead.id}")
+        with self.assertRaises(agent_run_service.AgentRunSystemError) as raised:
+            self._execute_for_lead(lead.id)
 
-        self.assertEqual(response.status_code, 500)
-        self.assertEqual(response.json(), {"detail": "Email generation failed"})
-        self.assertNotIn("provider secret", response.text)
         self.assertEqual(self._email_count(), 0)
         with self.session_factory() as db:
-            run = db.scalar(select(AgentRun))
+            run = db.get(AgentRun, raised.exception.run_id)
             self.assertIsNotNone(run)
             self.assertEqual(run.status, AgentRunStatus.system_error)
             self.assertEqual(run.error_code, "agent_execution_failed")
+            self.assertNotIn("provider secret", run.error_code)
 
     def test_commit_failure_rolls_back_and_returns_safe_500(self):
         lead = self._seed_lead()
@@ -336,7 +337,7 @@ class EmailAgentIntegrationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 500)
         self.assertEqual(
-            response.json(), {"detail": "Generated email could not be saved"}
+            response.json(), {"detail": "Email generation could not be queued"}
         )
         self.assertEqual(len(failing_sessions), 1)
         self.assertTrue(failing_sessions[0].rollback_called)

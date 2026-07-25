@@ -12,10 +12,20 @@ Short version: this shows the approximate AI cost per request and per 100 reques
 
 - One generated email: **about $0.006 - $0.015**
 - 100 generated emails: **about $0.60 - $1.50**
+- Syncing or importing an existing opportunity: **$0 AI cost**
+- Syncing or importing a new opportunity: queues one email-generation attempt
+- Manual Generate, Regenerate, or Retry: queues another billable attempt
+
+The API request itself is not billable AI work. Cost occurs when the separate
+worker claims the job and calls Gemini and Bedrock. Replaying the same
+idempotency key, repeatedly syncing an existing opportunity, and viewing or
+editing an email do not queue another attempt. Failed provider calls can still
+consume some tokens, but failed jobs are never retried automatically.
 
 ## Other actions
 
-- Overview, opportunities list, search, edit, approve: **$0 AI cost**
+- Overview, opportunities list, search, email history, edit, approve:
+  **$0 AI cost**
 - Document upload: **S3 cost only**
 
 ## Tiny pilot example

@@ -2,15 +2,27 @@
 
 One EarlyBid opportunity = one Lead = one card in the UI.
 """
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db.database import get_db
-from app.db.models import Lead
-from app.schemas.lead import LeadRead, SyncResult
-from app.services import lead_feed_service
+from app.db.models import EmailGenerationTrigger, Lead
+from app.schemas.email_generation import (
+    EmailGenerationJobRead,
+    EmailGenerationRequest,
+)
+from app.schemas.lead import (
+    LeadListRead,
+    LeadRead,
+    LeadUploadResult,
+    LeadWorkspaceRead,
+    SyncResult,
+)
+from app.services import email_generation_service, lead_feed_service
 from app.services.lead_feed_service import LeadFeedError, LeadFeedValidationError
 
 settings = get_settings()
@@ -48,14 +60,15 @@ def sync_feed(
         ) from exc
 
 
-@router.post("/upload-csv", response_model=list[LeadRead])
+@router.post("/upload-csv", response_model=LeadUploadResult)
 async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """Upload an EarlyBid-format CSV; each row is upserted as a Lead."""
     text = (await file.read()).decode("utf-8-sig")
     rows = lead_feed_service.parse_feed_csv(text)
 
+    created_leads: list[Lead] = []
     try:
-        touched, _, _ = lead_feed_service.upsert_feed_rows(
+        touched, created, updated = lead_feed_service.upsert_feed_rows(
             db,
             rows,
             source_feed=f"upload:{file.filename}",
@@ -63,6 +76,7 @@ async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)
                 settings.lead_feed_reseller,
                 settings.lead_feed_client,
             ),
+            created_leads=created_leads,
         )
     except LeadFeedValidationError as exc:
         raise HTTPException(
@@ -70,12 +84,103 @@ async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)
             detail=exc.as_detail(),
         ) from exc
 
-    db.commit()
+    try:
+        db.flush()
+        jobs = email_generation_service.enqueue_initial_generations(
+            db,
+            created_leads,
+            trigger=EmailGenerationTrigger.csv_upload,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     for lead in touched:
         db.refresh(lead)
-    return touched
+    return LeadUploadResult(
+        items=touched,
+        created=created,
+        updated=updated,
+        total=len(rows),
+        generation_queued=len(jobs),
+    )
 
 
-@router.get("", response_model=list[LeadRead])
+@router.get("", response_model=list[LeadListRead])
 def list_leads(db: Session = Depends(get_db)):
-    return db.scalars(select(Lead).order_by(Lead.score.desc().nullslast())).all()
+    leads = db.scalars(
+        select(Lead).order_by(Lead.score.desc().nullslast())
+    ).all()
+    return [
+        LeadListRead(
+            **LeadRead.model_validate(lead).model_dump(),
+            current_email=email_generation_service.current_email_for_lead(
+                db, lead.id
+            ),
+            latest_generation=email_generation_service.latest_generation_job(
+                db, lead.id
+            ),
+        )
+        for lead in leads
+    ]
+
+
+@router.get("/{lead_id}/workspace", response_model=LeadWorkspaceRead)
+def get_lead_workspace(lead_id: str, db: Session = Depends(get_db)):
+    """Return opportunity details, email history, and current generation state."""
+
+    lead = db.get(Lead, _canonical_lead_id(lead_id))
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    emails = email_generation_service.emails_for_lead(db, lead.id)
+    current_email = emails[0] if emails else None
+    return LeadWorkspaceRead(
+        lead=lead,
+        emails=emails,
+        current_email_id=current_email.id if current_email else None,
+        current_email_is_stale=email_generation_service.current_email_is_stale(
+            lead, current_email
+        ),
+        latest_generation=email_generation_service.latest_generation_job(
+            db, lead.id
+        ),
+    )
+
+
+@router.post(
+    "/{lead_id}/email-generations",
+    response_model=EmailGenerationJobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def request_email_generation(
+    lead_id: str,
+    payload: EmailGenerationRequest,
+    db: Session = Depends(get_db),
+):
+    """Idempotently queue a manual first draft, regeneration, or retry."""
+
+    try:
+        return email_generation_service.enqueue_generation(
+            db,
+            lead_id=lead_id,
+            idempotency_key=str(payload.idempotency_key),
+        )
+    except email_generation_service.LeadNotFoundError:
+        raise HTTPException(status_code=404, detail="Lead not found") from None
+    except email_generation_service.IdempotencyKeyConflictError:
+        raise HTTPException(
+            status_code=409,
+            detail="Idempotency key is already in use",
+        ) from None
+    except email_generation_service.EmailGenerationPersistenceError:
+        raise HTTPException(
+            status_code=500,
+            detail="Email generation could not be queued",
+        ) from None
+
+
+def _canonical_lead_id(lead_id: str) -> str:
+    try:
+        return str(UUID(lead_id))
+    except (AttributeError, ValueError):
+        raise HTTPException(status_code=404, detail="Lead not found") from None

@@ -5,6 +5,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from app.db.models import EmailStatus
+from app.schemas.email import EmailRead
+from app.schemas.email_generation import EmailGenerationJobRead
+
 
 class LeadRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -52,3 +56,35 @@ class SyncResult(BaseModel):
     updated: int
     total: int
     feed: str
+    generation_queued: int
+
+
+class LeadUploadResult(BaseModel):
+    items: list[LeadRead]
+    created: int
+    updated: int
+    total: int
+    generation_queued: int
+
+
+class CurrentEmailSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    status: EmailStatus
+    recipient_email: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class LeadListRead(LeadRead):
+    current_email: CurrentEmailSummary | None = None
+    latest_generation: EmailGenerationJobRead | None = None
+
+
+class LeadWorkspaceRead(BaseModel):
+    lead: LeadRead
+    emails: list[EmailRead]
+    current_email_id: str | None = None
+    current_email_is_stale: bool = False
+    latest_generation: EmailGenerationJobRead | None = None

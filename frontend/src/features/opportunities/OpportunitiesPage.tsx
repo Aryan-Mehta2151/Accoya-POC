@@ -13,13 +13,33 @@ import {
 import { Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { EmptyState, ErrorState, LoadingState, PageHeader } from "../../components/ui";
+import { EmptyState, ErrorState, LoadingState, PageHeader, StatusBadge } from "../../components/ui";
 import { api, ApiError } from "../../lib/api";
 import { queryKeys } from "../../lib/queryKeys";
 import type { Lead } from "../../types";
 import styles from "./opportunities.module.css";
 
 type ScoreSort = "desc" | "asc";
+type OutreachFilter =
+  | ""
+  | "pending_review"
+  | "approved"
+  | "sent"
+  | "rejected"
+  | "generating"
+  | "generation_issues"
+  | "no_email";
+
+const outreachOptions: Array<{ value: OutreachFilter; label: string }> = [
+  { value: "", label: "All outreach" },
+  { value: "pending_review", label: "Needs review" },
+  { value: "approved", label: "Approved" },
+  { value: "sent", label: "Sent" },
+  { value: "rejected", label: "Rejected" },
+  { value: "generating", label: "Generating" },
+  { value: "generation_issues", label: "Generation issues" },
+  { value: "no_email", label: "No email" },
+];
 
 const scoreFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 1,
@@ -64,6 +84,36 @@ function uniqueOptions(values: Array<string | null>) {
     .sort((a, b) => a.localeCompare(b));
 }
 
+function generationIsActive(lead: Lead) {
+  return lead.latest_generation?.status === "queued" || lead.latest_generation?.status === "running";
+}
+
+function generationHasIssue(lead: Lead) {
+  const status = lead.latest_generation?.status;
+  return status === "insufficient_context" || status === "provider_error" || status === "system_error";
+}
+
+function matchesOutreachFilter(lead: Lead, filter: OutreachFilter) {
+  if (!filter) return true;
+  if (filter === "generating") return generationIsActive(lead);
+  if (filter === "generation_issues") return generationHasIssue(lead);
+  if (filter === "no_email") return !lead.current_email && !generationIsActive(lead);
+  return lead.current_email?.status === filter;
+}
+
+function OpportunityOutreachBadges({ lead }: { lead: Lead }) {
+  return (
+    <span className={styles.outreachBadges}>
+      {generationIsActive(lead) ? <StatusBadge status="generating" /> : null}
+      {generationHasIssue(lead) ? <StatusBadge status="generation_issue" /> : null}
+      {lead.current_email ? <StatusBadge status={lead.current_email.status} /> : null}
+      {!lead.current_email && !generationIsActive(lead) && !generationHasIssue(lead)
+        ? <StatusBadge status="no_email" />
+        : null}
+    </span>
+  );
+}
+
 function OpportunityCard({ lead }: { lead: Lead }) {
   return (
     <article className={styles.mobileCard}>
@@ -92,6 +142,10 @@ function OpportunityCard({ lead }: { lead: Lead }) {
           <dt>Signal</dt>
           <dd>{displayValue(lead.signal)}</dd>
         </div>
+        <div>
+          <dt>Outreach</dt>
+          <dd><OpportunityOutreachBadges lead={lead} /></dd>
+        </div>
       </dl>
       <Link className={styles.cardLink} to={`/opportunities/${lead.id}`}>
         View opportunity <span aria-hidden="true">→</span>
@@ -108,6 +162,10 @@ export function OpportunitiesPage() {
   const search = searchParams.get("q") ?? "";
   const state = searchParams.get("state") ?? "";
   const timing = searchParams.get("timing") ?? "";
+  const outreachParam = searchParams.get("outreach") ?? "";
+  const outreach: OutreachFilter = outreachOptions.some((option) => option.value === outreachParam)
+    ? outreachParam as OutreachFilter
+    : "";
   const scoreSort: ScoreSort = searchParams.get("sort") === "asc" ? "asc" : "desc";
 
   const leadsQuery = useQuery({
@@ -120,7 +178,7 @@ export function OpportunitiesPage() {
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.leads });
       toast.success("EarlyBid feed synchronized", {
-        description: `${result.created} created · ${result.updated} updated`,
+        description: `${result.created} created · ${result.updated} updated · ${result.generation_queued} drafts queued`,
       });
     },
     onError: (error) => {
@@ -135,7 +193,7 @@ export function OpportunitiesPage() {
     onSuccess: async (uploaded) => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.leads });
       toast.success("CSV import complete", {
-        description: `${uploaded.length} ${uploaded.length === 1 ? "opportunity" : "opportunities"} imported.`,
+        description: `${uploaded.created} created · ${uploaded.updated} updated · ${uploaded.generation_queued} drafts queued`,
       });
     },
     onError: (error) => {
@@ -155,8 +213,9 @@ export function OpportunitiesPage() {
       .filter((lead) => !needle || leadSearchText(lead).includes(needle))
       .filter((lead) => !state || lead.state === state)
       .filter((lead) => !timing || lead.timing === timing)
+      .filter((lead) => matchesOutreachFilter(lead, outreach))
       .sort((a, b) => compareScores(a, b, scoreSort));
-  }, [leads, scoreSort, search, state, timing]);
+  }, [leads, outreach, scoreSort, search, state, timing]);
 
   const updateParam = (name: string, value: string) => {
     const next = new URLSearchParams(searchParams);
@@ -166,7 +225,7 @@ export function OpportunitiesPage() {
   };
 
   const clearFilters = () => setSearchParams({}, { replace: true });
-  const hasFilters = Boolean(search || state || timing || searchParams.has("sort"));
+  const hasFilters = Boolean(search || state || timing || outreach || searchParams.has("sort"));
   const isMutating = syncMutation.isPending || uploadMutation.isPending;
 
   const actions = (
@@ -303,6 +362,15 @@ export function OpportunitiesPage() {
               </select>
             </label>
 
+            <label className={styles.selectField}>
+              <span>Outreach</span>
+              <select value={outreach} onChange={(event) => updateParam("outreach", event.target.value)}>
+                {outreachOptions.map((option) => (
+                  <option key={option.value || "all"} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+
             <button
               className={styles.sortButton}
               type="button"
@@ -349,6 +417,7 @@ export function OpportunitiesPage() {
                       <th scope="col">Location</th>
                       <th scope="col">Timing</th>
                       <th scope="col">Contact</th>
+                      <th scope="col">Outreach</th>
                       <th scope="col" className={styles.scoreColumn}>Score</th>
                     </tr>
                   </thead>
@@ -380,6 +449,7 @@ export function OpportunitiesPage() {
                             {lead.contact_email ? <small>{lead.contact_email}</small> : null}
                           </span>
                         </td>
+                        <td><OpportunityOutreachBadges lead={lead} /></td>
                         <td className={styles.scoreColumn}>
                           <span className={styles.scoreBadge}>{formatScore(lead.score)}</span>
                         </td>

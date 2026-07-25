@@ -21,6 +21,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -55,8 +56,32 @@ class AgentRunStatus(str, enum.Enum):
     system_error = "system_error"
 
 
+class EmailGenerationJobStatus(str, enum.Enum):
+    queued = "queued"
+    running = "running"
+    generated = "generated"
+    insufficient_context = "insufficient_context"
+    provider_error = "provider_error"
+    system_error = "system_error"
+
+
+class EmailGenerationTrigger(str, enum.Enum):
+    earlybid_sync = "earlybid_sync"
+    csv_upload = "csv_upload"
+    manual = "manual"
+    retry = "retry"
+
+
 _EMAIL_STATUS = Enum(EmailStatus, name="email_status")
 _AGENT_RUN_STATUS = Enum(AgentRunStatus, name="agent_run_status")
+_EMAIL_GENERATION_JOB_STATUS = Enum(
+    EmailGenerationJobStatus,
+    name="email_generation_job_status",
+)
+_EMAIL_GENERATION_TRIGGER = Enum(
+    EmailGenerationTrigger,
+    name="email_generation_trigger",
+)
 
 
 class Lead(Base):
@@ -128,6 +153,124 @@ class Lead(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    email_generation_jobs: Mapped[list[EmailGenerationJob]] = relationship(
+        back_populates="lead",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class EmailGenerationJob(Base):
+    """Durable request for one asynchronous outreach-generation attempt."""
+
+    __tablename__ = "email_generation_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "length(requested_input_hash) = 64",
+            name="ck_email_generation_jobs_input_hash_sha256",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_email_generation_jobs_attempt_count_nonnegative",
+        ),
+        CheckConstraint(
+            "(status = 'queued' AND claimed_at IS NULL "
+            "AND heartbeat_at IS NULL AND completed_at IS NULL "
+            "AND attempt_count = 0) OR "
+            "(status = 'running' AND claimed_at IS NOT NULL "
+            "AND heartbeat_at IS NOT NULL AND completed_at IS NULL "
+            "AND attempt_count > 0) OR "
+            "(status IN ('generated', 'insufficient_context', "
+            "'provider_error', 'system_error') "
+            "AND completed_at IS NOT NULL AND attempt_count > 0)",
+            name="ck_email_generation_jobs_lifecycle",
+        ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_email_generation_jobs_idempotency_key",
+        ),
+        Index(
+            "ix_email_generation_jobs_one_active_per_lead",
+            "lead_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+            sqlite_where=text("status IN ('queued', 'running')"),
+        ),
+        Index(
+            "ix_email_generation_jobs_status_queued_at",
+            "status",
+            "queued_at",
+        ),
+        Index(
+            "ix_email_generation_jobs_lead_queued_at",
+            "lead_id",
+            "queued_at",
+        ),
+        Index(
+            "ix_email_generation_jobs_retry_of_job_id",
+            "retry_of_job_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
+    lead_id: Mapped[str] = mapped_column(
+        _UUID,
+        ForeignKey("leads.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    retry_of_job_id: Mapped[str | None] = mapped_column(
+        _UUID,
+        ForeignKey("email_generation_jobs.id", ondelete="SET NULL"),
+    )
+    trigger: Mapped[EmailGenerationTrigger] = mapped_column(
+        _EMAIL_GENERATION_TRIGGER,
+        nullable=False,
+    )
+    status: Mapped[EmailGenerationJobStatus] = mapped_column(
+        _EMAIL_GENERATION_JOB_STATUS,
+        nullable=False,
+        default=EmailGenerationJobStatus.queued,
+        server_default=EmailGenerationJobStatus.queued.value,
+    )
+    requested_input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(Text)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    claimed_by: Mapped[str | None] = mapped_column(Text)
+    queued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    lead: Mapped[Lead] = relationship(back_populates="email_generation_jobs")
+    retry_of: Mapped[EmailGenerationJob | None] = relationship(
+        remote_side="EmailGenerationJob.id",
+        back_populates="retries",
+        foreign_keys=[retry_of_job_id],
+    )
+    retries: Mapped[list[EmailGenerationJob]] = relationship(
+        back_populates="retry_of",
+        foreign_keys=[retry_of_job_id],
+    )
+    agent_run: Mapped[AgentRun | None] = relationship(
+        back_populates="email_generation_job",
+        uselist=False,
+    )
+
+    @property
+    def agent_run_id(self) -> str | None:
+        """Expose the linked run without duplicating the foreign key."""
+
+        return self.agent_run.id if self.agent_run is not None else None
 
 
 class AgentRun(Base):
@@ -169,6 +312,10 @@ class AgentRun(Base):
         Index("ix_agent_runs_status_started_at", "status", "started_at"),
         Index("ix_agent_runs_retry_of_run_id", "retry_of_run_id"),
         Index("ix_agent_runs_started_at_id", "started_at", "id"),
+        UniqueConstraint(
+            "email_generation_job_id",
+            name="uq_agent_runs_email_generation_job_id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
@@ -180,6 +327,10 @@ class AgentRun(Base):
     retry_of_run_id: Mapped[str | None] = mapped_column(
         _UUID,
         ForeignKey("agent_runs.id", ondelete="RESTRICT"),
+    )
+    email_generation_job_id: Mapped[str | None] = mapped_column(
+        _UUID,
+        ForeignKey("email_generation_jobs.id", ondelete="SET NULL"),
     )
     status: Mapped[AgentRunStatus] = mapped_column(
         _AGENT_RUN_STATUS,
@@ -241,6 +392,9 @@ class AgentRun(Base):
     retries: Mapped[list[AgentRun]] = relationship(
         back_populates="retry_of",
         foreign_keys=[retry_of_run_id],
+    )
+    email_generation_job: Mapped[EmailGenerationJob | None] = relationship(
+        back_populates="agent_run",
     )
     email: Mapped[Email | None] = relationship(
         back_populates="agent_run",

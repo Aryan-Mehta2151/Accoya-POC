@@ -16,8 +16,9 @@ The application ingests construction opportunities from an EarlyBid CSV feed,
 stores them as leads, uploads marketing strategy documents to S3, retrieves
 strategy and nurturing context through an AWS Bedrock Knowledge Base, generates
 outreach emails through a LangGraph/Gemini agent, supports a human-review status
-workflow, and exposes a knowledge-base chatbot. A React SPA provides Leads,
-Strategy Docs, Email Approval, and Chatbot tabs.
+workflow, and exposes a knowledge-base chatbot. New leads durably queue their
+first email for a separate worker. A React SPA provides Overview,
+Opportunities with inline outreach review, Strategy Docs, and Chatbot tabs.
 
 The backend stack is FastAPI, Pydantic 2, synchronous SQLAlchemy 2, PostgreSQL,
 boto3, LangGraph, LangChain/Gemini, and httpx. The frontend is React 19,
@@ -38,7 +39,9 @@ TypeScript 6, Vite 8, native `fetch`, and global CSS.
   Alembic-head checks, and the idempotent database bootstrap command.
 - `backend/alembic/`: the greenfield baseline and Alembic runtime environment.
 - `backend/app/services/`: integrations and business logic for EarlyBid, S3,
-  Bedrock, Gemini, email-agent integration, and RAG.
+  Bedrock, Gemini, email-agent integration, durable generation jobs, and RAG.
+- `backend/app/workers/email_generation.py`: separately started PostgreSQL
+  queue worker; the FastAPI process never performs queued provider work.
 - `backend/agent/`: standalone synchronous Accoya email agent, including
   normalization, catalog routing, Gemini stages, Bedrock retrieval, telemetry,
   and offline unit tests.
@@ -75,6 +78,8 @@ Copy-Item .env.example .env
 # postgresql+psycopg2://postgres:YOUR_PASSWORD@localhost:5433/accoya_agent
 python -m app.db.bootstrap
 python -m uvicorn app.main:app --reload
+# In a second backend terminal with the same environment:
+python -m app.workers.email_generation
 ```
 
 The default server is `http://localhost:8000`, OpenAPI is at `/docs`, health is
@@ -83,6 +88,9 @@ checks connectivity and requires the configured database to be at the current
 Alembic head; it never creates or upgrades tables. `python -m app.db.bootstrap`
 creates the configured PostgreSQL database when absent and idempotently applies
 all migrations. Run it after changing `DATABASE_URL` or pulling a migration.
+Run one worker by default for this POC. It exits without claiming jobs when
+provider configuration is incomplete, and queued work survives process
+restarts.
 
 ### Frontend
 
@@ -111,12 +119,13 @@ any other tracked file.
 | AWS | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Blank keys let boto3 use its normal credential chain/IAM role. Code defaults to `us-east-1`, while `.env.example` says `us-east-2`. |
 | S3 | `S3_BUCKET_STRATEGY_DOCS` | Required for document list/upload/delete. |
 | Bedrock KB | `BEDROCK_KB_ID`, `BEDROCK_KB_MODEL_ARN`, `BEDROCK_KB_TOP_K` | The model setting accepts a model ID or full ARN. |
-| Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL` | Used by the three email-agent model stages; the active chat route does not use Gemini. |
+| Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_REQUEST_TIMEOUT_SECONDS` | Used by the worker's email agent; the timeout applies to each Gemini request. The active chat route does not use Gemini. |
+| Email worker | `EMAIL_GENERATION_WORKER_POLL_SECONDS`, `EMAIL_GENERATION_HEARTBEAT_SECONDS`, `EMAIL_GENERATION_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. Keep the stale threshold safely above the heartbeat interval. |
 | EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Sync uses Bearer auth; reseller/client also scope derived natural identities. |
 | Frontend | `VITE_API_BASE_URL` | Optional; include `/api` unless `API_PREFIX` was changed. |
 
 `get_settings()` is cached, and multiple modules retain the returned object at
-module scope. Restart the backend after changing environment values.
+module scope. Restart the backend and worker after changing environment values.
 
 ## Implemented request and data flows
 
@@ -131,29 +140,41 @@ module scope. Restart the backend after changing environment values.
   are excluded. Repeat sync updates the same projection; changing project name
   or location creates a new identity. Invalid or conflicting batches are
   atomic: upload returns 422 and remote sync returns 502 without partial
-  writes. Normalized `next_step`, decimal score, best recipient, and tags are
-  persisted. Tags and the detached complete source row use JSONB. `GET
-  /api/leads` sorts by descending score. This uses the existing external-ID
-  column and unique constraint, so it requires no database migration.
+  writes. Each newly inserted lead queues one initial email-generation job in
+  the same transaction; updated/unchanged leads never auto-regenerate and
+  existing rows are not backfilled. Normalized `next_step`, decimal score, best
+  recipient, and tags are persisted. Tags and the detached complete source row
+  use JSONB. `GET /api/leads` sorts by descending score and includes separate
+  current-email/latest-generation summaries.
 - Documents: upload reads the entire file, stores it under a UUID-prefixed S3
   key, then records metadata in PostgreSQL. Listing uses S3, not the metadata
   table, as its source of truth. Deletion removes the S3 object and performs
   best-effort metadata cleanup. There is no size/type validation.
-- Agent runs: `POST /api/agent-runs` synchronously creates and commits a
-  `running` record before provider work, then finalizes it as `generated`,
-  `insufficient_context`, `provider_error`, or `system_error`. `GET
+- Email-generation jobs: `POST /api/leads/{lead_id}/email-generations`
+  idempotently queues manual Generate, Regenerate, or Retry work and returns
+  202. Jobs persist the trigger, requested input hash, safe outcome, attempt
+  count, and queue/claim/heartbeat/completion timestamps, never prompts or
+  lead/email content. At most one queued/running job exists per lead. The
+  worker claims with PostgreSQL `SKIP LOCKED`, commits the linked running
+  `AgentRun`, calls providers outside database transactions, heartbeats, and
+  atomically finalizes the job/run/email/status event. Failures and stale jobs
+  are terminal and are never automatically replayed.
+- Agent runs: a worker claim creates and commits a `running` record before
+  provider work, then finalizes it as `generated`, `insufficient_context`,
+  `provider_error`, or `system_error`. `GET
   /api/agent-runs` supports lead/status filters and descending cursor
   pagination; `GET /api/agent-runs/{run_id}` reads one safe outcome; `POST
-  /api/agent-runs/{run_id}/retry` creates a linked run from the lead's current
-  projection. Terminal outcomes retain only the input hash, safe selection and
-  error fields, original draft, code versions, and aggregate telemetry.
-- Emails: `POST /api/emails/generate/{lead_id}` is the compatibility facade over
-  persisted agent runs. Generated outcomes create a mutable email in
-  `pending_review`; insufficient context returns 422 and provider failure 502.
-  Failures retain the run but create no email. A generated run's original draft
-  remains immutable while subject/body edits affect the review email and each
-  status transition appends an `email_status_events` row. The status enum is
-  `draft`, `pending_review`, `approved`, `sent`, or `rejected`.
+  /api/agent-runs/{run_id}/retry` is a deprecated enqueueing adapter. Terminal
+  outcomes retain only the input hash, safe selection/error fields, original
+  draft, code versions, and aggregate telemetry.
+- Opportunity workspace: `GET /api/leads/{lead_id}/workspace` returns the lead,
+  newest-first email history, current email ID, input-staleness flag, and latest
+  generation. `GET /api/emails/{email_id}` supports legacy deep links. Email
+  responses expose the stored recipient snapshot. A generated run's original
+  draft remains immutable while subject/body edits affect the review email and
+  each status transition appends an `email_status_events` row. The old
+  generation endpoints remain only as deprecated queue adapters; HTTP request
+  handlers never call the provider.
 - Agent diagnostics: `/api/agent/*` accepts raw lead mappings and can expose
   detailed results, retrieval references, and traces. It is registered only in
   development and is not part of the production API surface.
@@ -173,6 +194,12 @@ module scope. Restart the backend after changing environment values.
   hints, and SQLAlchemy 2 `Mapped` declarations, matching nearby code.
 - Obtain configuration through `get_settings()`; do not read secrets directly
   from the environment in feature modules.
+- Keep queue operations transactionally durable and idempotent. Do not add a
+  browser mount effect, FastAPI background task, or in-memory queue as a second
+  generation path.
+- Do not hold a database transaction or row lock across Gemini/Bedrock calls.
+  Preserve `SKIP LOCKED` job claiming, heartbeat/stale-job handling, one active
+  job per lead, and no automatic queue-level retry.
 - Use FastAPI dependencies for database sessions and response models for typed
   endpoints. Existing database and external clients are synchronous.
 - Translate expected integration failures into useful HTTP errors without
@@ -222,6 +249,7 @@ Run the checks relevant to the changed area from the indicated directory.
 # backend/
 python -m compileall -q app agent alembic
 python -m unittest discover -s agent/tests -t . -p "test_*.py"
+python -m unittest tests.test_email_generation_queue -v
 python -m unittest discover -s tests -v
 
 # frontend/
@@ -253,6 +281,12 @@ scope separation, missing identity components, duplicate conflicts, atomic
 uploads/syncs, and their respective HTTP 422/502 responses. Sample CSV tests
 must remain offline and must not persist or commit real contact data.
 
+Queue coverage must remain provider-free and include new-only initial jobs,
+unchanged/updated import skips, manual idempotency, one-active-job behavior,
+workspace ordering/staleness, all worker terminal outcomes, sync never invoking
+the provider, stale leases, and PostgreSQL concurrency/index behavior. Do not
+start the live worker as an automated smoke test.
+
 ## Safety and known gaps
 
 - `.env`, virtual environments, `node_modules`, build output, logs, local
@@ -260,15 +294,19 @@ must remain offline and must not persist or commit real contact data.
   CSVs, contact data, or captured API payloads.
 - The API has no authentication or authorization. Do not expose it publicly in
   its current form.
-- Treat lead sync, document upload/delete/list, email generation, and chat as
-  live integration operations: they can write PostgreSQL/S3, process PII, or
-  incur API charges. Do not use them as automated checks without explicit
+- Treat lead sync and CSV upload as PostgreSQL/PII writes that automatically
+  queue one draft for every new lead. Running the worker, document
+  upload/delete/list, manual regeneration, and chat can call live, billable, or
+  mutating integrations. Do not use them as automated checks without explicit
   authorization and non-production resources.
 - Document upload does not trigger a Bedrock KB ingestion job.
 - Email status changes do not send mail, and `sent` emails are not indexed into
   the KB. The UI's "Send to client" action only changes the status.
 - Scheduled feed sync and AWS deployment remain out of scope. Alembic is
   configured with a clean baseline; legacy import/backfill is out of scope.
+- Deploy the database migration, web API, and separately supervised worker
+  together. Do not enable new-lead ingestion until a worker is available, and
+  do not infer authorization to backfill existing leads.
 - EarlyBid supplies no immutable opportunity ID. Project renames or location
   corrections produce new natural identities; automatic reconciliation is out
   of scope.

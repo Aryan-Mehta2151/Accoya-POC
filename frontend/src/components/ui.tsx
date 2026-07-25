@@ -87,6 +87,9 @@ const STATUS_LABELS: Record<string, string> = {
   approved: 'Approved',
   sent: 'Marked sent',
   rejected: 'Rejected',
+  generating: 'Generating',
+  generation_issue: 'Generation issue',
+  no_email: 'No email',
 };
 
 export function StatusBadge({ status }: { status: string }) {
