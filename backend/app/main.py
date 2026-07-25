@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import agent_runs, chat, documents, emails, leads
+from app.api.routes import agent_runs, auth, chat, documents, emails, leads
 from app.config import get_settings
 from app.db.database import check_database_schema
 
@@ -44,6 +44,7 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(leads.router, prefix=settings.api_prefix)
 app.include_router(documents.router, prefix=settings.api_prefix)
 app.include_router(emails.router, prefix=settings.api_prefix)

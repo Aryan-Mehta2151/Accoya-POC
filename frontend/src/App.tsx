@@ -1,4 +1,4 @@
-import { createBrowserRouter, RouterProvider } from 'react-router-dom';
+import { createBrowserRouter, RouterProvider, Navigate } from 'react-router-dom';
 import { Toaster } from 'sonner';
 import { AppShell } from './app/AppShell';
 import { NotFoundPage } from './app/NotFoundPage';
@@ -7,10 +7,52 @@ import { KnowledgePage } from './features/knowledge';
 import { OpportunitiesPage, OpportunityDetailPage } from './features/opportunities';
 import { OutreachDetailPage, OutreachPage } from './features/outreach';
 import { OverviewPage } from './features/overview/OverviewPage';
+import { 
+  CallbackPage, 
+  ForgotPasswordPage, 
+  LoginPage, 
+  ResetPasswordPage 
+} from './features/auth';
+import { useAuth } from './hooks/useAuth';
+
+// Protected route wrapper
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>Loading...</div>;
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return children;
+}
 
 const router = createBrowserRouter([
   {
-    element: <AppShell />,
+    path: '/login',
+    element: <LoginPage />,
+  },
+  {
+    path: '/auth/callback',
+    element: <CallbackPage />,
+  },
+  {
+    path: '/forgot-password',
+    element: <ForgotPasswordPage />,
+  },
+  {
+    path: '/reset-password',
+    element: <ResetPasswordPage />,
+  },
+  {
+    element: (
+      <ProtectedRoute>
+        <AppShell />
+      </ProtectedRoute>
+    ),
     children: [
       { index: true, element: <OverviewPage /> },
       { path: 'opportunities', element: <OpportunitiesPage /> },

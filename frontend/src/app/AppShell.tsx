@@ -10,9 +10,12 @@ import {
   Sparkles,
   Target,
   X,
+  LogOut,
+  User as UserIcon,
 } from 'lucide-react';
 import { useState } from 'react';
-import { NavLink, Outlet } from 'react-router-dom';
+import { NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { useAuth } from '../hooks/useAuth';
 import styles from './AppShell.module.css';
 
 const NAV_ITEMS = [
@@ -57,6 +60,50 @@ function Navigation({ compact = false, onNavigate }: { compact?: boolean; onNavi
         </NavLink>
       ))}
     </nav>
+  );
+}
+
+function UserMenu() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+
+  const handleLogout = () => {
+    logout();
+    navigate('/login');
+  };
+
+  return (
+    <div className={styles.userMenu}>
+      <button
+        type='button'
+        className={styles.userMenuTrigger}
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-haspopup='menu'
+      >
+        <span className={styles.userAvatar}><UserIcon aria-hidden='true' /></span>
+        <span>{user?.name || user?.email}</span>
+      </button>
+
+      {open && (
+        <div className={styles.userMenuPanel} role='menu'>
+          <div className={styles.userIdentity}>
+            <strong>{user?.name || 'Accoya user'}</strong>
+            <span>{user?.email}</span>
+          </div>
+          <button
+            type='button'
+            className={styles.signOutButton}
+            onClick={handleLogout}
+            role='menuitem'
+          >
+            <LogOut aria-hidden='true' />
+            Sign out
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -105,6 +152,10 @@ export function AppShell() {
           <Menu aria-hidden='true' />
         </button>
       </header>
+
+      <div className={styles.userMenuPosition}>
+        <UserMenu />
+      </div>
 
       <Dialog.Root open={mobileOpen} onOpenChange={setMobileOpen}>
         <Dialog.Portal>

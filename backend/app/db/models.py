@@ -356,6 +356,57 @@ class ChatMessage(Base):
     )
 
 
+class User(Base):
+    """User account for authentication."""
+
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("email", name="uq_users_email"),
+    )
+
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(255))
+    password_hash: Mapped[str | None] = mapped_column(String(255))
+    oauth_provider: Mapped[str | None] = mapped_column(String(50))  # "google"
+    oauth_id: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class PasswordResetToken(Base):
+    """Password reset tokens for email-based authentication."""
+
+    __tablename__ = "password_reset_tokens"
+    __table_args__ = (
+        UniqueConstraint("token", name="uq_password_reset_tokens_token"),
+        Index("ix_password_reset_tokens_user_id", "user_id"),
+    )
+
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        _UUID,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    token: Mapped[str] = mapped_column(String(255), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class StrategyDocument(Base):
     """Metadata for strategy docs stored in S3 and indexed in Bedrock KB."""
 

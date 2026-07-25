@@ -50,6 +50,24 @@ class Settings(BaseSettings):
     lead_feed_reseller: str = "amped"
     lead_feed_client: str = "amped-accoya-materials"
 
+    # Google OAuth
+    google_client_id: str = ""
+    google_client_secret: str = ""
+
+    # JWT
+    jwt_secret_key: str = ""
+    access_token_expire_minutes: int = 1440  # 24 hours
+    password_reset_token_expire_minutes: int = 15
+
+    # SMTP
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_email: str = ""
+    smtp_password: str = ""
+
+    # Frontend URL (for reset password links)
+    frontend_url: str = "http://localhost:5173"
+
 
 @lru_cache
 def get_settings() -> Settings:
