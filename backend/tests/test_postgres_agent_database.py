@@ -12,6 +12,7 @@ import unittest
 import uuid
 from collections.abc import Mapping
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from alembic import command
@@ -20,6 +21,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Text, create_engine, event, func, inspect, select
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from agent.models import (
@@ -34,6 +36,8 @@ from app.db.database import get_db
 from app.db.models import (
     AgentRun,
     AgentRunStatus,
+    EarlyBidSyncRun,
+    EarlyBidSyncRunStatus,
     Email,
     EmailGenerationJob,
     EmailGenerationJobStatus,
@@ -45,6 +49,7 @@ from app.db.models import (
 from app.schemas.email import EmailStatusUpdate
 from app.services import (
     agent_run_service,
+    earlybid_sync_service,
     email_generation_service,
     email_generator,
     lead_feed_service,
@@ -155,6 +160,7 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
     def _clean_agent_rows(cls) -> None:
         """Delete only agent-subsystem tables in dependency order."""
         with cls.engine.begin() as connection:
+            connection.execute(EarlyBidSyncRun.__table__.delete())
             connection.execute(EmailStatusEvent.__table__.delete())
             connection.execute(Email.__table__.delete())
             connection.execute(AgentRun.__table__.delete())
@@ -225,6 +231,26 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
             index["name"]: index
             for index in inspector.get_indexes("email_generation_jobs")
         }
+        sync_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("earlybid_sync_runs")
+        }
+        sync_indexes = {
+            index["name"]: index
+            for index in inspector.get_indexes("earlybid_sync_runs")
+        }
+        sync_checks = {
+            constraint["name"]: constraint
+            for constraint in inspector.get_check_constraints(
+                "earlybid_sync_runs"
+            )
+        }
+        sync_uniques = {
+            constraint["name"]: constraint
+            for constraint in inspector.get_unique_constraints(
+                "earlybid_sync_runs"
+            )
+        }
         self.assertEqual(agent_run_columns["model_calls"]["default"], "0")
         self.assertEqual(agent_run_columns["retrieval_count"]["default"], "0")
         self.assertEqual(
@@ -242,6 +268,39 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
             str(active_index.get("dialect_options", {})).casefold(),
         )
         self.assertIn("email_generation_job_id", agent_run_columns)
+        self.assertEqual(sync_columns["attempt_count"]["default"], "0")
+        self.assertEqual(
+            sync_indexes["ix_earlybid_sync_runs_due"]["column_names"],
+            ["status", "next_attempt_at", "scheduled_for"],
+        )
+        self.assertEqual(
+            sync_indexes["ix_earlybid_sync_runs_heartbeat"]["column_names"],
+            ["status", "heartbeat_at"],
+        )
+        self.assertEqual(
+            sync_uniques["uq_earlybid_sync_runs_feed_schedule_date"][
+                "column_names"
+            ],
+            ["reseller", "client", "schedule_date"],
+        )
+        self.assertIn(
+            "created_count + updated_count <= total_count",
+            sync_checks["ck_earlybid_sync_runs_result_count_bounds"][
+                "sqltext"
+            ],
+        )
+        self.assertIn(
+            "status = 'succeeded'",
+            sync_checks["ck_earlybid_sync_runs_terminal_result_shape"][
+                "sqltext"
+            ],
+        )
+        sync_lifecycle = sync_checks["ck_earlybid_sync_runs_lifecycle"][
+            "sqltext"
+        ]
+        self.assertIn("status = 'failed'", sync_lifecycle)
+        self.assertIn("attempt_count = 0", sync_lifecycle)
+        self.assertIn("claimed_by IS NULL", sync_lifecycle)
 
         command.check(database.make_alembic_config(TEST_DATABASE_URL))
 
@@ -614,6 +673,65 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
             claimed_job = db.get(EmailGenerationJob, claim.job_id)
             self.assertEqual(first_job.status, EmailGenerationJobStatus.queued)
             self.assertEqual(claimed_job.status, EmailGenerationJobStatus.running)
+
+    def test_earlybid_slot_is_unique_and_claim_skips_locked_run(self):
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as db:
+            first = EarlyBidSyncRun(
+                reseller="postgres-reseller",
+                client="first-client",
+                schedule_date=now.date(),
+                scheduled_for=now,
+            )
+            second = EarlyBidSyncRun(
+                reseller="postgres-reseller",
+                client="second-client",
+                schedule_date=now.date(),
+                scheduled_for=now,
+            )
+            db.add_all([first, second])
+            db.commit()
+            first_id = first.id
+            second_id = second.id
+
+        with self.session_factory() as db:
+            db.add(
+                EarlyBidSyncRun(
+                    reseller="postgres-reseller",
+                    client="first-client",
+                    schedule_date=now.date(),
+                    scheduled_for=now,
+                )
+            )
+            with self.assertRaises(IntegrityError):
+                db.commit()
+            db.rollback()
+
+        with self.session_factory() as locking_db:
+            locked = locking_db.scalar(
+                select(EarlyBidSyncRun)
+                .where(EarlyBidSyncRun.id == first_id)
+                .with_for_update()
+            )
+            self.assertIsNotNone(locked)
+
+            with self.session_factory() as competing_db:
+                claim = earlybid_sync_service.claim_next_run(
+                    competing_db,
+                    worker_id="postgres-sync-worker",
+                    now=now,
+                )
+
+            self.assertIsNotNone(claim)
+            self.assertEqual(claim.run_id, str(second_id))
+            locking_db.rollback()
+
+        with self.session_factory() as db:
+            first_run = db.get(EarlyBidSyncRun, first_id)
+            second_run = db.get(EarlyBidSyncRun, second_id)
+            self.assertEqual(first_run.status, EarlyBidSyncRunStatus.queued)
+            self.assertEqual(second_run.status, EarlyBidSyncRunStatus.running)
+            self.assertEqual(second_run.attempt_count, 1)
 
     def test_concurrent_status_transitions_keep_a_contiguous_event_chain(self):
         lead_id = self._seed_normalized_lead("concurrent-status-lead")

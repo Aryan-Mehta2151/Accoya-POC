@@ -33,3 +33,5 @@ email-validator==2.2.0
 # --- Utils ---
 python-dotenv==1.2.2
 pandas==3.0.3
+# IANA timezone database for zoneinfo on Windows scheduler hosts.
+tzdata==2026.3

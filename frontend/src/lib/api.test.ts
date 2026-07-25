@@ -44,6 +44,40 @@ describe('API client', () => {
     expect(leads[0]).toMatchObject({ project: 'Riverside Pavilion', score: 92 });
   });
 
+  it('loads the durable daily EarlyBid synchronization status', async () => {
+    server.use(
+      http.get(`${base}/leads/sync-status`, () => HttpResponse.json({
+        timezone: 'America/Los_Angeles',
+        next_scheduled_at: '2026-07-26T07:00:00Z',
+        overdue: false,
+        latest_run: {
+          id: 'sync-run-1',
+          feed: 'reseller/client',
+          schedule_date: '2026-07-25',
+          scheduled_for: '2026-07-25T07:00:00Z',
+          status: 'retry_wait',
+          attempt_count: 1,
+          error_code: 'upstream_unavailable',
+          next_attempt_at: '2026-07-25T07:05:00Z',
+          created: 0,
+          updated: 0,
+          total: 0,
+          generation_queued: 0,
+          claimed_at: '2026-07-25T07:00:01Z',
+          completed_at: null,
+        },
+      })),
+    );
+
+    await expect(api.getLeadSyncStatus()).resolves.toMatchObject({
+      timezone: 'America/Los_Angeles',
+      latest_run: {
+        status: 'retry_wait',
+        next_attempt_at: '2026-07-25T07:05:00Z',
+      },
+    });
+  });
+
   it('preserves friendly generation queue errors and warnings', async () => {
     server.use(
       http.post(`${base}/leads/lead-1/email-generations`, () => HttpResponse.json(

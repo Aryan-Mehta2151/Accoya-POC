@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 from sqlalchemy import create_engine, text
 
 from app.db import bootstrap, database
-from app.db.models import AgentRun, EmailGenerationJob
+from app.db.models import AgentRun, EarlyBidSyncRun, EmailGenerationJob
 
 
 class SchemaValidationTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class SchemaValidationTests(unittest.TestCase):
 
     def test_missing_revision_is_rejected_and_head_is_accepted(self) -> None:
         expected_heads = database.get_expected_schema_heads()
-        self.assertEqual(expected_heads, ("0004_email_generation_queue",))
+        self.assertEqual(expected_heads, ("0005_earlybid_daily_sync",))
 
         with patch.object(database, "engine", self.engine):
             with self.assertRaisesRegex(RuntimeError, "not at the required"):
@@ -112,6 +112,67 @@ class SchemaValidationTests(unittest.TestCase):
                 for constraint in AgentRun.__table__.constraints
             )
         )
+
+    def test_earlybid_sync_metadata_enforces_schedule_and_attempt_invariants(self):
+        table = EarlyBidSyncRun.__table__
+
+        self.assertEqual(table.c.status.default.arg.value, "queued")
+        self.assertEqual(str(table.c.status.server_default.arg), "queued")
+        for name in (
+            "attempt_count",
+            "created_count",
+            "updated_count",
+            "total_count",
+            "generation_queued_count",
+        ):
+            self.assertEqual(table.c[name].default.arg, 0)
+            self.assertEqual(str(table.c[name].server_default.arg), "0")
+
+        schedule_constraint = next(
+            constraint
+            for constraint in table.constraints
+            if constraint.name
+            == "uq_earlybid_sync_runs_feed_schedule_date"
+        )
+        self.assertEqual(
+            [column.name for column in schedule_constraint.columns],
+            ["reseller", "client", "schedule_date"],
+        )
+        due_index = next(
+            index
+            for index in table.indexes
+            if index.name == "ix_earlybid_sync_runs_due"
+        )
+        self.assertEqual(
+            [column.name for column in due_index.columns],
+            ["status", "next_attempt_at", "scheduled_for"],
+        )
+        heartbeat_index = next(
+            index
+            for index in table.indexes
+            if index.name == "ix_earlybid_sync_runs_heartbeat"
+        )
+        self.assertEqual(
+            [column.name for column in heartbeat_index.columns],
+            ["status", "heartbeat_at"],
+        )
+        checks = {
+            constraint.name: str(constraint.sqltext)
+            for constraint in table.constraints
+            if constraint.name and hasattr(constraint, "sqltext")
+        }
+        self.assertIn(
+            "created_count + updated_count <= total_count",
+            checks["ck_earlybid_sync_runs_result_count_bounds"],
+        )
+        self.assertIn(
+            "status = 'succeeded'",
+            checks["ck_earlybid_sync_runs_terminal_result_shape"],
+        )
+        lifecycle = checks["ck_earlybid_sync_runs_lifecycle"]
+        self.assertIn("status = 'failed'", lifecycle)
+        self.assertIn("attempt_count = 0", lifecycle)
+        self.assertIn("claimed_by IS NULL", lifecycle)
 
 
 class BootstrapHelperTests(unittest.TestCase):

@@ -1,9 +1,11 @@
 # AI Marketing Outreach POC
 
-An unauthenticated proof of concept that ingests EarlyBid construction
-opportunities, queues personalized Accoya nurturing emails for background
-generation, supports human review on each opportunity, manages strategy
-documents, and provides a knowledge-base chatbot.
+A proof of concept that ingests EarlyBid construction opportunities manually
+or on a durable daily schedule, queues personalized Accoya nurturing emails for
+background generation, supports human review on each opportunity, manages
+strategy documents, and provides a knowledge-base chatbot. The browser has
+JWT-backed sign-in screens, but the lead, email, document, and chat API routes
+do not yet enforce authentication; do not expose this POC publicly.
 
 The backend separates requested work from provider execution. Every request is
 first represented by a durable `email_generation_jobs` record, and every
@@ -15,14 +17,19 @@ FastAPI owns queueing, persistence, and the production-safe API contracts.
 
 - **Backend:** FastAPI 0.139.2, Pydantic 2.13.4, pydantic-settings 2.14.2,
   synchronous SQLAlchemy 2.0.51, Alembic 1.18.5, and psycopg2 2.9.12
-- **Database:** PostgreSQL 18 (the local POC uses PostgreSQL 18.4 on port 5433)
+- **Database:** PostgreSQL (the local Docker Compose setup uses PostgreSQL 16
+  on port 5432)
 - **Email agent:** LangGraph 1.2.9 with Google Gemini structured generation
 - **Retrieval:** AWS Bedrock Knowledge Base `Retrieve` calls
 - **Documents:** AWS S3
 - **Frontend:** React 19, TypeScript 6, and Vite 8
 
 ```text
-EarlyBid CSV -> agent normalization -> current PostgreSQL lead projection
+daily sync worker -> earlybid_sync_run -> EarlyBid CSV
+                                           |
+manual sync -------------------------------`
+                                           |
+                                           `-> current PostgreSQL lead projection
                                            |
                                            `-> queued email_generation_job
                                                   |
@@ -53,12 +60,22 @@ warning and composition continues with whatever context is available.
 
 ### Prerequisites
 
+- Git
 - Python 3.11 or newer
 - Docker Desktop or another local PostgreSQL instance
 - Node.js `^20.19.0`, `^22.13.0`, or `>=24`
 - Provider credentials only for the live features you intend to exercise
 
 Run backend commands from `backend/` and frontend commands from `frontend/`.
+After cloning, open PowerShell at the repository root:
+
+```powershell
+git clone <repository-url>
+cd Accoya-POC
+```
+
+If the repository is already present, omit `git clone` and change into its
+existing root directory.
 
 ### 1. Configure and bootstrap PostgreSQL
 
@@ -88,6 +105,24 @@ out of `.env.example` and other tracked files:
 DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/ai_marketing
 ```
 
+Generate a local JWT signing secret:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Copy the printed value into `backend/.env` and keep the local frontend URL:
+
+```dotenv
+JWT_SECRET_KEY=replace-with-the-generated-value
+FRONTEND_URL=http://localhost:5173
+```
+
+Email/password signup and login then work locally without Google or SMTP
+credentials. Password-reset email requires the SMTP settings described below.
+Google sign-in additionally requires Google OAuth credentials and the exact
+local callback `http://localhost:8000/api/auth/callback/google`.
+
 Then create the database, if needed, and migrate it to the current Alembic
 head:
 
@@ -108,7 +143,8 @@ bootstrap command.
 ### 2. Start FastAPI
 
 ```powershell
-# From backend/ with the virtual environment active
+cd backend
+.\.venv\Scripts\Activate.ps1
 python -m uvicorn app.main:app --reload
 ```
 
@@ -123,6 +159,7 @@ one worker:
 
 ```powershell
 cd backend
+.\.venv\Scripts\Activate.ps1
 python -m app.workers.email_generation
 ```
 
@@ -136,7 +173,34 @@ missing. It does not automatically replay an ambiguous provider call:
 `insufficient_context`, provider failures, system failures, and abandoned
 leases remain terminal until a user explicitly retries.
 
-### 4. Start the React frontend
+### 4. Start the daily EarlyBid sync worker
+
+In another backend terminal, start one scheduler worker:
+
+```powershell
+cd backend
+.\.venv\Scripts\Activate.ps1
+python -m app.workers.earlybid_sync
+```
+
+The worker schedules the configured reseller/client feed for local midnight in
+`LEAD_AUTO_SYNC_TIMEZONE` (default `America/Los_Angeles`). If it starts after
+midnight and today's run does not exist, it queues that current-day run as a
+catch-up; it never replays missed prior dates. PostgreSQL uniqueness and row
+locking make multiple worker processes safe, although one is the recommended
+POC deployment. Once today's slot exists, prior-date queued, retrying, or
+running rows are terminalized with the safe `superseded_schedule` code without
+calling EarlyBid. A late prior-date result rechecks the schedule before lead
+changes are staged, so it cannot overwrite the current projection.
+
+Scheduled sync failures use bounded retries: four total attempts, delayed 5,
+15, and 30 minutes. Network errors, timeouts/HTTP 408, HTTP 429/5xx,
+persistence errors, and expired worker leases are retryable. The worker refuses
+to start with missing configuration. Authentication errors, other HTTP 4xx
+responses, invalid feeds, and a configuration failure discovered after startup
+terminate the current run without retrying it.
+
+### 5. Start the React frontend
 
 In another terminal:
 
@@ -150,6 +214,18 @@ Open `http://localhost:5173`. Browser requests default to
 `http://localhost:8000/api`; set `VITE_API_BASE_URL` to override the complete
 API base, including the prefix. FastAPI allows the local `localhost` and
 `127.0.0.1` Vite origins on port 5173.
+
+Create an account with the email/password signup form on `/login`, then use
+that account to enter the application. The JWT is stored by the browser for UI
+session state. The shared lead/email/document/chat API client does not yet send
+that token or require it server-side, so this login is not a production
+authorization boundary.
+
+Google sign-in is currently local-development-specific: the frontend client ID
+and the frontend/backend callback URLs are hardcoded in the authentication
+implementation. Environment variables alone are not sufficient to move Google
+OAuth to another host. Use email/password locally unless those values match
+your Google OAuth application.
 
 An empty database is a valid starting point, so opportunities and agent-run API
 lists remain empty until data is ingested. Newly inserted opportunities queue
@@ -174,11 +250,15 @@ directory.
 | Bedrock chat | `BEDROCK_KB_MODEL_ARN` | Model ID or ARN used by the separate `RetrieveAndGenerate` chatbot flow. |
 | Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_REQUEST_TIMEOUT_SECONDS` | Used by the worker's structured email agent; the 180-second default applies to each Gemini request. |
 | Email worker | `EMAIL_GENERATION_WORKER_POLL_SECONDS`, `EMAIL_GENERATION_HEARTBEAT_SECONDS`, `EMAIL_GENERATION_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. The stale threshold must remain comfortably above the heartbeat interval and expected scheduling jitter. |
-| EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Configures Bearer-authenticated feed sync. The reseller/client scope is also part of the derived identity for rows without a source ID. |
+| EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Configures Bearer-authenticated manual and scheduled feed sync. The reseller/client scope is also part of the derived identity for rows without a source ID. |
+| Daily sync worker | `LEAD_AUTO_SYNC_TIMEZONE`, `LEAD_AUTO_SYNC_POLL_SECONDS`, `LEAD_AUTO_SYNC_HEARTBEAT_SECONDS`, `LEAD_AUTO_SYNC_STALE_SECONDS` | Defaults to `America/Los_Angeles`, 30, 15, and 300 seconds. The timezone must be an IANA name and the stale threshold must exceed the heartbeat interval. |
+| Authentication | `JWT_SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `FRONTEND_URL` | Set a strong local JWT secret before signup. The access-token default is 1,440 minutes and the frontend defaults to `http://localhost:5173`. Authentication currently gates the browser UI only; core business API routes remain unprotected. |
+| Google OAuth | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Optional. The current frontend client ID and local callback URLs are also hardcoded in code, so these settings alone do not make Google OAuth portable. |
+| Password reset | `SMTP_HOST`, `SMTP_PORT`, `SMTP_EMAIL`, `SMTP_PASSWORD`, `PASSWORD_RESET_TOKEN_EXPIRE_MINUTES` | Optional unless testing forgot-password email. SMTP defaults to Gmail on port 587 and reset tokens default to 15 minutes. |
 | Frontend | `VITE_API_BASE_URL` | Optional full browser API base; include `/api` unless `API_PREFIX` changes. |
 
 Settings and the configured email agent are process-cached. Restart FastAPI
-and the worker after changing environment values.
+and both workers after changing environment values.
 
 ## Agent-centric PostgreSQL database
 
@@ -188,9 +268,16 @@ schema. It imports no old records and intentionally has no backfill path:
 - `0001_agent_centric_baseline` creates the complete application schema.
 - `0002_agent_run_pagination_index` adds the `(started_at, id)` index used by
   unfiltered descending agent-run cursor pagination.
+- `0003_chat_session_sequencing` adds per-session message ordering and explicit
+  human/assistant roles.
+- `5662aa7157b7` adds users and password-reset tokens for the browser
+  authentication flows.
 - `0004_email_generation_queue` adds durable email-generation jobs and links a
   claimed job to at most one agent run. Applying it does not enqueue or
   generate drafts for existing leads.
+- `0005_earlybid_daily_sync` adds durable daily feed runs. Applying it creates
+  no run and contacts no provider; the separately started sync worker creates
+  only the configured feed's current-day slot.
 
 PostgreSQL stores identifiers as native `UUID`, flexible source data as
 `JSONB`, timestamps as timezone-aware `TIMESTAMPTZ`, and agent/email lifecycle
@@ -213,12 +300,13 @@ leads 1 ---- * email_generation_jobs
                                                              |
                                                              `---- * email_status_events
 
-chat_messages                 strategy_documents
+earlybid_sync_runs            chat_messages            strategy_documents
 ```
 
 | Table | Purpose and important invariants |
 | --- | --- |
 | `leads` | Current normalized lead projection with native UUID primary key and unique `(source_system, external_id)` identity. It stores all current agent inputs, first-class `next_step`, optional `contact_email`, JSONB tags and detached raw feed payload, source metadata, and create/update/archive timestamps. Feed sync updates this projection rather than creating historical snapshots. |
+| `earlybid_sync_runs` | One durable scheduled run per reseller/client/local schedule date. Status is `queued`, `running`, `retry_wait`, `succeeded`, or `failed`; the row records its UTC schedule, attempt and lease state, safe error code, next retry time, completion time, and final ingestion/generation counts. It stores no feed payload or contact data. |
 | `email_generation_jobs` | Durable requested work for one lead. A job records its trigger, requested input hash, idempotency key, optional retry link, safe error code, attempt count, and queue/claim/heartbeat/completion timestamps. Status is `queued`, `running`, `generated`, `insufficient_context`, `provider_error`, or `system_error`. A unique idempotency key makes request replay safe, and a PostgreSQL partial unique index allows at most one queued/running job per lead. |
 | `agent_runs` | One durable attempt for one lead, with optional `retry_of_run_id` and nullable unique `email_generation_job_id` for worker-created attempts. Status is `running`, `generated`, `insufficient_context`, `provider_error`, or `system_error`. A run stores the curated-input SHA-256 hash, safe selections/warnings/error code, immutable original draft, prompt/catalog versions, model name, aggregate model/retrieval/token counts, latency, and start/completion times. Database checks enforce the SHA-256 shape, nonnegative telemetry, nurturing numbers 1-7, and valid running/generated/failure terminal shapes. |
 | `emails` | At most one mutable review email for a generated run through a unique, non-null `agent_run_id`. It stores unrestricted subject/body text, optional recipient snapshot, review status, and timestamps. `lead_id` in the existing API response is derived through the run instead of duplicated. |
@@ -292,6 +380,28 @@ The sync response includes `generation_queued`. CSV upload now returns
 `{items, created, updated, total, generation_queued}` rather than a bare lead
 array, so clients can report both ingestion and queue results without polling.
 
+### Daily scheduled synchronization
+
+The separate EarlyBid worker creates at most one run for each configured
+reseller/client and local calendar date. Local midnight is converted with the
+configured IANA timezone, so daylight-saving transitions naturally produce
+23- or 25-hour UTC intervals without shifting the local schedule. Starting the
+worker later that day creates only today's catch-up run; dates before today are
+not replayed.
+
+Workers claim due `queued` or `retry_wait` rows with PostgreSQL row locking,
+heartbeat while the EarlyBid request and ingestion run, and recover expired
+leases through the bounded retry policy. A successful attempt atomically
+commits the normalized lead upserts, first-draft jobs for newly inserted leads,
+and the sync run's success counts. Invalid feeds and failed attempts never
+leave partial lead or email-generation-job writes.
+
+Manual `POST /api/leads/sync` remains available and synchronous. It is not a
+scheduler override and does not create or consume a daily run. The read-only
+`GET /api/leads/sync-status` endpoint reports the configured timezone, next
+local-midnight schedule in UTC, whether today's run is overdue, and the latest
+safe run summary; reading status never contacts EarlyBid.
+
 The full detached source row is retained in `raw_data` JSONB for the current
 projection, but email generation passes Gemini only an explicit allowlist of
 stored lead fields plus the application lead UUID, source system, and external
@@ -302,7 +412,14 @@ ID. ORM internals and arbitrary raw feed fields are never added to the prompt.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | Process health after successful database/schema startup |
+| POST | `/api/auth/signup` | Create an email/password user and return a JWT |
+| POST | `/api/auth/login` | Authenticate an email/password user and return a JWT |
+| GET | `/api/auth/callback/google` | Complete the local Google OAuth redirect flow |
+| POST | `/api/auth/forgot-password` | Create a reset token and attempt an SMTP reset email |
+| POST | `/api/auth/reset-password` | Consume a reset token and replace the password |
+| GET | `/api/auth/me` | Read the JWT-authenticated user |
 | POST | `/api/leads/sync` | Fetch and upsert the configured EarlyBid feed |
+| GET | `/api/leads/sync-status` | Read daily schedule and latest durable run status without syncing |
 | POST | `/api/leads/upload-csv` | Normalize and upsert an uploaded feed CSV |
 | GET | `/api/leads` | List leads with current-email and latest-generation summaries |
 | GET | `/api/leads/{lead_id}/workspace` | Read an opportunity, email history, active email, staleness, and latest generation |
@@ -387,6 +504,9 @@ APIs.
   safe provider outcome.
 - Feed sync and CSV upload only persist leads and jobs; they never instantiate
   or invoke the email agent. Only the worker performs billable generation.
+- The daily sync worker is the only automatic EarlyBid caller. It logs run/feed
+  identifiers, attempts, safe error codes, timings, and aggregate counts, never
+  CSV rows, contact data, credentials, or upstream response bodies.
 - Structured operational logs contain job/run/lead identifiers, status,
   warning counts, call counts, token totals, and latency - not lead contents,
   generated email text, prompts, or retrieved chunk text.
@@ -407,6 +527,7 @@ verification.
 python -m compileall -q app agent alembic
 python -m unittest discover -s agent/tests -t . -p "test_*.py"
 python -m unittest tests.test_email_generation_queue -v
+python -m unittest tests.test_earlybid_sync_scheduler -v
 python -m unittest discover -s tests -v
 
 # From frontend/
@@ -422,6 +543,13 @@ deterministic `earlybid-natural-v1` IDs, repeat imports, mutable-field changes,
 scope separation, invalid components, duplicate conflicts, and the upload/sync
 422/502 atomic failure contracts.
 
+Scheduler tests use fixed clocks and fake EarlyBid responses. They cover local
+midnight and daylight-saving boundaries, current-day catch-up, uniqueness,
+claim/heartbeat/stale recovery, retry classification and delays, terminal
+attempt limits, atomic ingestion, safe status responses, and invalid worker
+configuration without making a network request. PostgreSQL-only coverage
+checks the schedule uniqueness constraint and `SKIP LOCKED` worker claims.
+
 The opt-in PostgreSQL integration suite additionally verifies migration/index
 constraints, partial active-job uniqueness, `SKIP LOCKED` claiming, stale
 lease handling, clean/idempotent bootstrap, native types/defaults, immutable
@@ -429,8 +557,8 @@ originals, and concurrent status-event ordering. Use only a dedicated database
 whose name ends in `_test`:
 
 ```powershell
-# From backend/; PostgreSQL must be listening on port 5433.
-$env:ACCOYA_TEST_DATABASE_URL="postgresql+psycopg2://postgres:YOUR_PASSWORD@localhost:5433/accoya_agent_test"
+# From backend/; the local Docker PostgreSQL instance listens on port 5432.
+$env:ACCOYA_TEST_DATABASE_URL="postgresql+psycopg2://postgres:postgres@localhost:5432/ai_marketing_test"
 python -m unittest tests.test_postgres_agent_database -v
 Remove-Item Env:ACCOYA_TEST_DATABASE_URL
 ```
@@ -446,19 +574,22 @@ python -m alembic check
 
 ## Known gaps and safety
 
-- The API has no authentication or authorization and must not be exposed
-  publicly.
-- Lead sync and CSV upload persist contact data and automatically queue a draft
-  for every newly inserted opportunity. The worker, document operations, and
-  chat can call billable or mutating external services.
+- The browser has signup/login screens and JWT session state, but the lead,
+  email, document, and chat routes do not enforce that JWT. The API must not be
+  exposed publicly.
+- Manual/scheduled lead sync and CSV upload persist contact data and
+  automatically queue a draft for every newly inserted opportunity. Both
+  workers, document operations, and chat can call billable or mutating external
+  services.
 - Email status changes do not send mail, and `sent` emails are not indexed into
   the knowledge base.
 - Document upload does not start a Bedrock KB ingestion job.
-- There is no scheduled feed sync, Docker environment, CI workflow, or AWS
-  deployment configuration.
-- The worker must be deployed and supervised separately from FastAPI. Deploy
-  the migration, API, and worker together; enable ingestion only after a worker
-  is available.
+- There is no bundled process supervisor, CI workflow, or AWS deployment
+  configuration. FastAPI and both workers must be deployed and supervised as
+  separate processes.
+- Deploy the migration, API, email worker, and sync worker together. Starting
+  the sync worker authorizes live daily EarlyBid calls and downstream draft
+  queueing; do not use it as a health check or automated test.
 - EarlyBid does not supply an immutable opportunity ID. A project rename or
   location correction therefore produces a new lead identity; reconciliation
   of renamed opportunities is not automated.

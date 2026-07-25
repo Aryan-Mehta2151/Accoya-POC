@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     lead_feed_reseller: str = "amped"
     lead_feed_client: str = "amped-accoya-materials"
 
+    # Separately supervised daily EarlyBid synchronization worker
+    lead_auto_sync_timezone: str = "America/Los_Angeles"
+    lead_auto_sync_heartbeat_seconds: float = 15.0
+    lead_auto_sync_stale_seconds: float = 300.0
+    lead_auto_sync_poll_seconds: float = 30.0
+
     # Google OAuth
     google_client_id: str = ""
     google_client_secret: str = ""

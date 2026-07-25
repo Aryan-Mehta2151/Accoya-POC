@@ -39,6 +39,37 @@ export type CsvUploadResult = {
   generation_queued: number;
 };
 
+export type EarlyBidSyncRunStatus =
+  | 'queued'
+  | 'running'
+  | 'retry_wait'
+  | 'succeeded'
+  | 'failed';
+
+export type EarlyBidSyncRun = {
+  id: string;
+  feed: string;
+  schedule_date: string;
+  scheduled_for: string;
+  status: EarlyBidSyncRunStatus;
+  attempt_count: number;
+  error_code: string | null;
+  next_attempt_at: string | null;
+  created: number;
+  updated: number;
+  total: number;
+  generation_queued: number;
+  claimed_at: string | null;
+  completed_at: string | null;
+};
+
+export type EarlyBidSyncStatus = {
+  timezone: string;
+  next_scheduled_at: string;
+  overdue: boolean;
+  latest_run: EarlyBidSyncRun | null;
+};
+
 export type EmailStatus =
   | 'draft'
   | 'pending_review'

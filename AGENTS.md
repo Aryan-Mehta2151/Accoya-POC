@@ -12,8 +12,9 @@ handles contact data and can call live, billable, or mutating external services.
 
 ## What this project does
 
-The application ingests construction opportunities from an EarlyBid CSV feed,
-stores them as leads, uploads marketing strategy documents to S3, retrieves
+The application ingests construction opportunities from an EarlyBid CSV feed
+manually and through a durable daily-midnight scheduler, stores them as leads,
+uploads marketing strategy documents to S3, retrieves
 strategy and nurturing context through an AWS Bedrock Knowledge Base, generates
 outreach emails through a LangGraph/Gemini agent, supports a human-review status
 workflow, and exposes a knowledge-base chatbot. New leads durably queue their
@@ -42,6 +43,8 @@ TypeScript 6, Vite 8, native `fetch`, and global CSS.
   Bedrock, Gemini, email-agent integration, durable generation jobs, and RAG.
 - `backend/app/workers/email_generation.py`: separately started PostgreSQL
   queue worker; the FastAPI process never performs queued provider work.
+- `backend/app/workers/earlybid_sync.py`: separately started PostgreSQL
+  scheduler/worker for current-day local-midnight EarlyBid synchronization.
 - `backend/agent/`: standalone synchronous Accoya email agent, including
   normalization, catalog routing, Gemini stages, Bedrock retrieval, telemetry,
   and offline unit tests.
@@ -80,6 +83,8 @@ python -m app.db.bootstrap
 python -m uvicorn app.main:app --reload
 # In a second backend terminal with the same environment:
 python -m app.workers.email_generation
+# In a third backend terminal with the same environment:
+python -m app.workers.earlybid_sync
 ```
 
 The default server is `http://localhost:8000`, OpenAPI is at `/docs`, health is
@@ -88,9 +93,10 @@ checks connectivity and requires the configured database to be at the current
 Alembic head; it never creates or upgrades tables. `python -m app.db.bootstrap`
 creates the configured PostgreSQL database when absent and idempotently applies
 all migrations. Run it after changing `DATABASE_URL` or pulling a migration.
-Run one worker by default for this POC. It exits without claiming jobs when
-provider configuration is incomplete, and queued work survives process
-restarts.
+Run one instance of each worker by default for this POC. PostgreSQL claims make
+multiple instances safe, and queued work survives process restarts. The email
+worker exits when provider configuration is incomplete; the sync worker exits
+when EarlyBid/schedule configuration is invalid.
 
 ### Frontend
 
@@ -122,10 +128,12 @@ any other tracked file.
 | Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_REQUEST_TIMEOUT_SECONDS` | Used by the worker's email agent; the timeout applies to each Gemini request. The active chat route does not use Gemini. |
 | Email worker | `EMAIL_GENERATION_WORKER_POLL_SECONDS`, `EMAIL_GENERATION_HEARTBEAT_SECONDS`, `EMAIL_GENERATION_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. Keep the stale threshold safely above the heartbeat interval. |
 | EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Sync uses Bearer auth; reseller/client also scope derived natural identities. |
+| Daily sync | `LEAD_AUTO_SYNC_TIMEZONE`, `LEAD_AUTO_SYNC_POLL_SECONDS`, `LEAD_AUTO_SYNC_HEARTBEAT_SECONDS`, `LEAD_AUTO_SYNC_STALE_SECONDS` | Defaults to `America/Los_Angeles`, 30, 15, and 300 seconds. Use an IANA timezone and keep stale greater than heartbeat. |
 | Frontend | `VITE_API_BASE_URL` | Optional; include `/api` unless `API_PREFIX` was changed. |
 
 `get_settings()` is cached, and multiple modules retain the returned object at
-module scope. Restart the backend and worker after changing environment values.
+module scope. Restart the backend and both workers after changing environment
+values.
 
 ## Implemented request and data flows
 
@@ -146,6 +154,19 @@ module scope. Restart the backend and worker after changing environment values.
   recipient, and tags are persisted. Tags and the detached complete source row
   use JSONB. `GET /api/leads` sorts by descending score and includes separate
   current-email/latest-generation summaries.
+- Daily EarlyBid sync: `earlybid_sync_runs` stores one scheduled run per
+  reseller/client/local date. `python -m app.workers.earlybid_sync` schedules
+  local midnight in `LEAD_AUTO_SYNC_TIMEZONE`, creates only a current-day
+  catch-up after restart, claims due work with `SKIP LOCKED`, and heartbeats its
+  lease. Once the current slot exists, prior-date active rows are terminalized
+  as `superseded_schedule` without a feed request, and late results cannot
+  mutate leads. It makes at most four attempts with 5/15/30-minute retry delays
+  for network/timeout, HTTP 429/5xx, persistence, and stale-lease failures.
+  Startup exits before touching the database or feed when configuration is
+  invalid; auth/other 4xx, invalid feeds, and late configuration failures are
+  terminal. Success atomically commits run counts, lead upserts, and initial
+  email jobs. `GET /api/leads/sync-status` is read-only and never calls
+  EarlyBid; manual sync remains synchronous and independent of the daily run.
 - Documents: upload reads the entire file, stores it under a UUID-prefixed S3
   key, then records metadata in PostgreSQL. Listing uses S3, not the metadata
   table, as its source of truth. Deletion removes the S3 object and performs
@@ -200,6 +221,13 @@ module scope. Restart the backend and worker after changing environment values.
 - Do not hold a database transaction or row lock across Gemini/Bedrock calls.
   Preserve `SKIP LOCKED` job claiming, heartbeat/stale-job handling, one active
   job per lead, and no automatic queue-level retry.
+- Keep daily scheduling in the separate worker, based on local calendar dates
+  and timezone-aware midnight conversion. Preserve current-day-only catch-up,
+  the unique feed/date identity, bounded retry classification, and atomic
+  success finalization. Do not schedule from FastAPI startup or page polling.
+- Never hold a database lock across the EarlyBid HTTP request. Worker leases
+  must heartbeat from an independent session; stale recovery may retry only
+  within the four-attempt limit.
 - Use FastAPI dependencies for database sessions and response models for typed
   endpoints. Existing database and external clients are synchronous.
 - Translate expected integration failures into useful HTTP errors without
@@ -250,6 +278,7 @@ Run the checks relevant to the changed area from the indicated directory.
 python -m compileall -q app agent alembic
 python -m unittest discover -s agent/tests -t . -p "test_*.py"
 python -m unittest tests.test_email_generation_queue -v
+python -m unittest tests.test_earlybid_sync_scheduler -v
 python -m unittest discover -s tests -v
 
 # frontend/
@@ -287,6 +316,15 @@ workspace ordering/staleness, all worker terminal outcomes, sync never invoking
 the provider, stale leases, and PostgreSQL concurrency/index behavior. Do not
 start the live worker as an automated smoke test.
 
+Scheduler coverage must use fixed clocks and fake EarlyBid responses. Cover
+timezone/DST midnight conversion, current-day-only catch-up, unique schedules,
+historical supersession and late-result rejection, due claims,
+heartbeats/stale recovery, retry classification and delays, the
+four-attempt terminal limit, atomic lead/email-job/run finalization, safe status
+responses, and invalid configuration. PostgreSQL coverage must exercise the
+unique feed/date constraint and `SKIP LOCKED`; never run the live sync worker in
+automated verification.
+
 ## Safety and known gaps
 
 - `.env`, virtual environments, `node_modules`, build output, logs, local
@@ -294,19 +332,19 @@ start the live worker as an automated smoke test.
   CSVs, contact data, or captured API payloads.
 - The API has no authentication or authorization. Do not expose it publicly in
   its current form.
-- Treat lead sync and CSV upload as PostgreSQL/PII writes that automatically
-  queue one draft for every new lead. Running the worker, document
-  upload/delete/list, manual regeneration, and chat can call live, billable, or
-  mutating integrations. Do not use them as automated checks without explicit
-  authorization and non-production resources.
+- Treat manual/scheduled lead sync and CSV upload as PostgreSQL/PII writes that
+  automatically queue one draft for every new lead. Running either worker,
+  document upload/delete/list, manual regeneration, and chat can call live,
+  billable, or mutating integrations. Do not use them as automated checks
+  without explicit authorization and non-production resources.
 - Document upload does not trigger a Bedrock KB ingestion job.
 - Email status changes do not send mail, and `sent` emails are not indexed into
   the KB. The UI's "Send to client" action only changes the status.
-- Scheduled feed sync and AWS deployment remain out of scope. Alembic is
+- AWS deployment and process supervision remain out of scope. Alembic is
   configured with a clean baseline; legacy import/backfill is out of scope.
-- Deploy the database migration, web API, and separately supervised worker
-  together. Do not enable new-lead ingestion until a worker is available, and
-  do not infer authorization to backfill existing leads.
+- Deploy the database migration, web API, and both separately supervised
+  workers together. Starting the sync worker authorizes recurring live EarlyBid
+  calls; do not infer authorization to replay prior dates or backfill leads.
 - EarlyBid supplies no immutable opportunity ID. Project renames or location
   corrections produce new natural identities; automatic reconciliation is out
   of scope.

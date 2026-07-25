@@ -35,6 +35,10 @@ class LeadFeedError(RuntimeError):
         self.status_code = status_code
 
 
+class LeadFeedConfigurationError(LeadFeedError):
+    """Raised when required EarlyBid client configuration is unavailable."""
+
+
 @dataclass(frozen=True)
 class LeadFeedValidationIssue:
     """A safe, row-scoped feed error that contains no lead values."""
@@ -64,6 +68,26 @@ class LeadFeedValidationError(LeadFeedError):
         }
 
 
+@dataclass(frozen=True)
+class StagedLeadSync:
+    """Counts staged by one feed ingestion before the caller commits."""
+
+    created: int
+    updated: int
+    total: int
+    feed: str
+    generation_queued: int
+
+    def as_dict(self) -> dict[str, int | str]:
+        return {
+            "created": self.created,
+            "updated": self.updated,
+            "total": self.total,
+            "feed": self.feed,
+            "generation_queued": self.generation_queued,
+        }
+
+
 def earlybid_identity_scope(
     reseller: str,
     client: str,
@@ -80,7 +104,7 @@ def earlybid_identity_scope(
 
 def _headers() -> dict[str, str]:
     if not settings.lead_api_key:
-        raise LeadFeedError("LEAD_API_KEY is not set")
+        raise LeadFeedConfigurationError("LEAD_API_KEY is not set")
     return {"Authorization": f"Bearer {settings.lead_api_key}"}
 
 
@@ -112,6 +136,12 @@ def fetch_latest_csv(reseller: str, client: str) -> str:
         ) from exc
     except httpx.HTTPError as exc:
         raise LeadFeedError(f"EarlyBid CSV request failed: {exc}") from exc
+
+
+def fetch_feed_rows(reseller: str, client: str) -> list[dict[str, str | None]]:
+    """Fetch and parse the current feed without opening a database transaction."""
+
+    return parse_feed_csv(fetch_latest_csv(reseller, client))
 
 
 def parse_feed_csv(text: str) -> list[dict[str, str | None]]:
@@ -272,36 +302,58 @@ def upsert_feed_rows(
     return touched, created, updated
 
 
-def sync_feed(db: Session, reseller: str, client: str) -> dict[str, int | str]:
-    """Pull and upsert the current EarlyBid lead projection."""
+def stage_feed_sync(
+    db: Session,
+    rows: list[Mapping[str, Any]],
+    *,
+    reseller: str,
+    client: str,
+) -> StagedLeadSync:
+    """Stage lead upserts and first-draft jobs without committing them."""
+
     source_feed = f"{reseller}/{client}"
-    rows = parse_feed_csv(fetch_latest_csv(reseller, client))
     created_leads: list[Lead] = []
+    _, created, updated = upsert_feed_rows(
+        db,
+        rows,
+        source_feed=source_feed,
+        identity_scope=earlybid_identity_scope(reseller, client),
+        created_leads=created_leads,
+    )
+    db.flush()
+    jobs = enqueue_initial_generations(
+        db,
+        created_leads,
+        trigger=EmailGenerationTrigger.earlybid_sync,
+    )
+    # Surface uniqueness or queue-persistence failures before a scheduled run
+    # is marked successful in the same transaction.
+    db.flush()
+    return StagedLeadSync(
+        created=created,
+        updated=updated,
+        total=len(rows),
+        feed=source_feed,
+        generation_queued=len(jobs),
+    )
+
+
+def sync_feed(db: Session, reseller: str, client: str) -> dict[str, int | str]:
+    """Fetch outside a transaction, then atomically persist the current feed."""
+
+    rows = fetch_feed_rows(reseller, client)
     try:
-        _, created, updated = upsert_feed_rows(
+        staged = stage_feed_sync(
             db,
             rows,
-            source_feed=source_feed,
-            identity_scope=earlybid_identity_scope(reseller, client),
-            created_leads=created_leads,
-        )
-        db.flush()
-        jobs = enqueue_initial_generations(
-            db,
-            created_leads,
-            trigger=EmailGenerationTrigger.earlybid_sync,
+            reseller=reseller,
+            client=client,
         )
         db.commit()
     except Exception:
         db.rollback()
         raise
-    return {
-        "created": created,
-        "updated": updated,
-        "total": len(rows),
-        "feed": source_feed,
-        "generation_queued": len(jobs),
-    }
+    return staged.as_dict()
 
 
 def _lock_source_scope(

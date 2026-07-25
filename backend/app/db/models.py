@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     CheckConstraint,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -72,6 +73,14 @@ class EmailGenerationTrigger(str, enum.Enum):
     retry = "retry"
 
 
+class EarlyBidSyncRunStatus(str, enum.Enum):
+    queued = "queued"
+    running = "running"
+    retry_wait = "retry_wait"
+    succeeded = "succeeded"
+    failed = "failed"
+
+
 _EMAIL_STATUS = Enum(EmailStatus, name="email_status")
 _AGENT_RUN_STATUS = Enum(AgentRunStatus, name="agent_run_status")
 _EMAIL_GENERATION_JOB_STATUS = Enum(
@@ -81,6 +90,10 @@ _EMAIL_GENERATION_JOB_STATUS = Enum(
 _EMAIL_GENERATION_TRIGGER = Enum(
     EmailGenerationTrigger,
     name="email_generation_trigger",
+)
+_EARLYBID_SYNC_RUN_STATUS = Enum(
+    EarlyBidSyncRunStatus,
+    name="earlybid_sync_run_status",
 )
 
 
@@ -158,6 +171,146 @@ class Lead(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+
+class EarlyBidSyncRun(Base):
+    """One durable daily synchronization slot for a configured EarlyBid feed."""
+
+    __tablename__ = "earlybid_sync_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_count BETWEEN 0 AND 4",
+            name="ck_earlybid_sync_runs_attempt_count",
+        ),
+        CheckConstraint(
+            "created_count >= 0 AND updated_count >= 0 "
+            "AND total_count >= 0 AND generation_queued_count >= 0",
+            name="ck_earlybid_sync_runs_result_counts_nonnegative",
+        ),
+        CheckConstraint(
+            "created_count + updated_count <= total_count "
+            "AND generation_queued_count <= created_count",
+            name="ck_earlybid_sync_runs_result_count_bounds",
+        ),
+        CheckConstraint(
+            "status = 'succeeded' OR "
+            "(created_count = 0 AND updated_count = 0 AND total_count = 0 "
+            "AND generation_queued_count = 0)",
+            name="ck_earlybid_sync_runs_terminal_result_shape",
+        ),
+        CheckConstraint(
+            "(status = 'queued' AND attempt_count = 0 "
+            "AND claimed_by IS NULL AND claimed_at IS NULL "
+            "AND heartbeat_at IS NULL AND next_attempt_at IS NULL "
+            "AND completed_at IS NULL AND error_code IS NULL) OR "
+            "(status = 'running' AND attempt_count BETWEEN 1 AND 4 "
+            "AND claimed_by IS NOT NULL AND claimed_at IS NOT NULL "
+            "AND heartbeat_at IS NOT NULL AND next_attempt_at IS NULL "
+            "AND completed_at IS NULL AND error_code IS NULL) OR "
+            "(status = 'retry_wait' AND attempt_count BETWEEN 1 AND 3 "
+            "AND claimed_by IS NOT NULL AND claimed_at IS NOT NULL "
+            "AND heartbeat_at IS NOT NULL AND next_attempt_at IS NOT NULL "
+            "AND completed_at IS NULL AND error_code IS NOT NULL) OR "
+            "(status = 'succeeded' AND attempt_count BETWEEN 1 AND 4 "
+            "AND claimed_by IS NOT NULL AND claimed_at IS NOT NULL "
+            "AND heartbeat_at IS NOT NULL AND next_attempt_at IS NULL "
+            "AND completed_at IS NOT NULL AND error_code IS NULL) OR "
+            "(status = 'failed' AND next_attempt_at IS NULL "
+            "AND completed_at IS NOT NULL AND error_code IS NOT NULL AND "
+            "((attempt_count = 0 AND claimed_by IS NULL "
+            "AND claimed_at IS NULL AND heartbeat_at IS NULL) OR "
+            "(attempt_count BETWEEN 1 AND 4 AND claimed_by IS NOT NULL "
+            "AND claimed_at IS NOT NULL AND heartbeat_at IS NOT NULL)))",
+            name="ck_earlybid_sync_runs_lifecycle",
+        ),
+        UniqueConstraint(
+            "reseller",
+            "client",
+            "schedule_date",
+            name="uq_earlybid_sync_runs_feed_schedule_date",
+        ),
+        Index(
+            "ix_earlybid_sync_runs_due",
+            "status",
+            "next_attempt_at",
+            "scheduled_for",
+        ),
+        Index(
+            "ix_earlybid_sync_runs_feed_schedule",
+            "reseller",
+            "client",
+            "schedule_date",
+        ),
+        Index(
+            "ix_earlybid_sync_runs_heartbeat",
+            "status",
+            "heartbeat_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
+    reseller: Mapped[str] = mapped_column(Text, nullable=False)
+    client: Mapped[str] = mapped_column(Text, nullable=False)
+    schedule_date: Mapped[date] = mapped_column(Date, nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    status: Mapped[EarlyBidSyncRunStatus] = mapped_column(
+        _EARLYBID_SYNC_RUN_STATUS,
+        nullable=False,
+        default=EarlyBidSyncRunStatus.queued,
+        server_default=EarlyBidSyncRunStatus.queued.value,
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    claimed_by: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[str | None] = mapped_column(Text)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    queued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    updated_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    total_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    generation_queued_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
+    @property
+    def feed(self) -> str:
+        return f"{self.reseller}/{self.client}"
+
+    @property
+    def created(self) -> int:
+        return self.created_count
+
+    @property
+    def updated(self) -> int:
+        return self.updated_count
+
+    @property
+    def total(self) -> int:
+        return self.total_count
+
+    @property
+    def generation_queued(self) -> int:
+        return self.generation_queued_count
 
 
 class EmailGenerationJob(Base):

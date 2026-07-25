@@ -1,5 +1,6 @@
 export const queryKeys = {
   leads: ['leads'] as const,
+  leadSyncStatus: ['lead-sync-status'] as const,
   emails: ['emails'] as const,
   email: (emailId: string) => ['email', emailId] as const,
   leadWorkspace: (leadId: string) => ['lead-workspace', leadId] as const,

@@ -15,6 +15,7 @@ from app.schemas.email_generation import (
     EmailGenerationJobRead,
     EmailGenerationRequest,
 )
+from app.schemas.earlybid_sync import EarlyBidSyncStatusRead
 from app.schemas.lead import (
     LeadListRead,
     LeadRead,
@@ -22,7 +23,11 @@ from app.schemas.lead import (
     LeadWorkspaceRead,
     SyncResult,
 )
-from app.services import email_generation_service, lead_feed_service
+from app.services import (
+    earlybid_sync_service,
+    email_generation_service,
+    lead_feed_service,
+)
 from app.services.lead_feed_service import LeadFeedError, LeadFeedValidationError
 
 settings = get_settings()
@@ -58,6 +63,19 @@ def sync_feed(
             status_code=502,
             detail=str(exc),
         ) from exc
+
+
+@router.get("/sync-status", response_model=EarlyBidSyncStatusRead)
+def get_automatic_sync_status(db: Session = Depends(get_db)):
+    """Return the configured feed's latest durable automatic-sync state."""
+
+    return earlybid_sync_service.get_sync_status(
+        db,
+        reseller=settings.lead_feed_reseller,
+        client=settings.lead_feed_client,
+        timezone_name=settings.lead_auto_sync_timezone,
+        stale_after_seconds=settings.lead_auto_sync_stale_seconds,
+    )
 
 
 @router.post("/upload-csv", response_model=LeadUploadResult)

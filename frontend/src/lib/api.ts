@@ -2,6 +2,7 @@ import type {
   ChatMessage,
   ChatResponse,
   CsvUploadResult,
+  EarlyBidSyncStatus,
   Email,
   EmailGenerationJob,
   EmailStatus,
@@ -135,6 +136,7 @@ function normalizeChatMessage(raw: unknown): ChatMessage {
 
 export const api = {
   listLeads: () => request<Lead[]>('/leads'),
+  getLeadSyncStatus: () => request<EarlyBidSyncStatus>('/leads/sync-status'),
   syncLeads: () => request<SyncResult>('/leads/sync', { method: 'POST' }),
   uploadLeadsCsv: (file: File) => {
     const data = new FormData();

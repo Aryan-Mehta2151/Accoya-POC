@@ -1,9 +1,11 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  CheckCircle2,
+  Clock3,
   FileUp,
   MapPin,
   RefreshCw,
@@ -16,7 +18,7 @@ import { toast } from "sonner";
 import { EmptyState, ErrorState, LoadingState, PageHeader, StatusBadge } from "../../components/ui";
 import { api, ApiError } from "../../lib/api";
 import { queryKeys } from "../../lib/queryKeys";
-import type { Lead } from "../../types";
+import type { EarlyBidSyncRunStatus, EarlyBidSyncStatus, Lead } from "../../types";
 import styles from "./opportunities.module.css";
 
 type ScoreSort = "desc" | "asc";
@@ -44,6 +46,166 @@ const outreachOptions: Array<{ value: OutreachFilter; label: string }> = [
 const scoreFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 1,
 });
+
+const automaticSyncActiveStatuses: ReadonlySet<EarlyBidSyncRunStatus> = new Set([
+  "queued",
+  "running",
+  "retry_wait",
+]);
+
+const automaticSyncLabels: Record<EarlyBidSyncRunStatus, string> = {
+  queued: "Queued",
+  running: "In progress",
+  retry_wait: "Retry scheduled",
+  succeeded: "Completed",
+  failed: "Failed",
+};
+
+const automaticSyncErrorLabels: Record<string, string> = {
+  missing_configuration: "The scheduler is missing required EarlyBid configuration.",
+  upstream_request_error: "The EarlyBid request could not be completed.",
+  upstream_unavailable: "EarlyBid was unavailable.",
+  upstream_rate_limited: "EarlyBid temporarily limited requests.",
+  upstream_auth_error: "EarlyBid rejected the configured credentials.",
+  invalid_feed: "EarlyBid returned an invalid feed.",
+  persistence_error: "The synchronized data could not be saved.",
+  superseded_schedule: "A newer daily schedule replaced this run.",
+  worker_lease_expired: "The scheduler worker stopped responding.",
+};
+
+function automaticSyncIsActive(status: EarlyBidSyncRunStatus | undefined) {
+  return status ? automaticSyncActiveStatuses.has(status) : false;
+}
+
+function formatPacificDateTime(value: string | null | undefined, timezone: string) {
+  if (!value) return "Not scheduled";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Not available";
+
+  const options: Intl.DateTimeFormatOptions = {
+    timeZone: timezone,
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  };
+  try {
+    return new Intl.DateTimeFormat("en-US", options).format(date);
+  } catch {
+    return new Intl.DateTimeFormat("en-US", {
+      ...options,
+      timeZone: "America/Los_Angeles",
+    }).format(date);
+  }
+}
+
+function AutomaticSyncStatusPanel({
+  status,
+  pending,
+  failed,
+  onRetry,
+}: {
+  status: EarlyBidSyncStatus | undefined;
+  pending: boolean;
+  failed: boolean;
+  onRetry: () => void;
+}) {
+  const run = status?.latest_run;
+  const timezone = status?.timezone ?? "America/Los_Angeles";
+  const isActive = automaticSyncIsActive(run?.status);
+
+  let title = "No automatic sync yet";
+  let description = "The scheduler will catch up today if midnight has already passed.";
+  if (pending) {
+    title = "Loading automatic sync status";
+    description = "Checking the daily EarlyBid schedule.";
+  } else if (failed) {
+    title = "Automatic sync status unavailable";
+    description = "Opportunities remain available, but the scheduler status could not be loaded.";
+  } else if (run?.status === "queued") {
+    title = "Automatic sync queued";
+    description = "The daily sync is waiting for a scheduler worker.";
+  } else if (run?.status === "running") {
+    title = "Automatic sync in progress";
+    description = `Attempt ${run.attempt_count} is synchronizing the latest EarlyBid feed.`;
+  } else if (run?.status === "retry_wait") {
+    title = "Automatic sync retry scheduled";
+    description = `Attempt ${run.attempt_count} did not complete. The scheduler will retry automatically.`;
+  } else if (run?.status === "succeeded") {
+    title = "Last automatic sync completed";
+    description = `${run.total} processed · ${run.created} created · ${run.updated} updated · ${run.generation_queued} drafts queued`;
+  } else if (run?.status === "failed") {
+    title = "Last automatic sync failed";
+    description = `Automatic sync stopped after ${run.attempt_count} attempt${run.attempt_count === 1 ? "" : "s"}. Manual sync is available.`;
+  }
+
+  return (
+    <section
+      id="automatic-sync-status"
+      className={styles.automaticSyncPanel}
+      data-status={run?.status ?? (failed ? "unavailable" : "idle")}
+      aria-labelledby="automatic-sync-title"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <span className={styles.automaticSyncIcon} aria-hidden="true">
+        {run?.status === "succeeded" ? <CheckCircle2 size={20} /> : <Clock3 size={20} />}
+      </span>
+      <div className={styles.automaticSyncCopy}>
+        <div className={styles.automaticSyncTopline}>
+          <p>Daily EarlyBid sync</p>
+          {run ? (
+            <span className={styles.automaticSyncBadge} data-status={run.status}>
+              {automaticSyncLabels[run.status]}
+            </span>
+          ) : null}
+          {status?.overdue ? <span className={styles.overdueBadge}>Overdue</span> : null}
+        </div>
+        <h2 id="automatic-sync-title">{title}</h2>
+        <p>{description}</p>
+        {run?.error_code ? (
+          <p className={styles.automaticSyncError}>
+            {automaticSyncErrorLabels[run.error_code] ?? "The scheduler reported a safe synchronization error."}
+          </p>
+        ) : null}
+        {status?.overdue ? (
+          <p className={styles.automaticSyncError}>The current daily run is overdue. Check the scheduler process.</p>
+        ) : null}
+        <dl className={styles.automaticSyncDetails}>
+          <div>
+            <dt>Next daily sync</dt>
+            <dd>{status ? formatPacificDateTime(status.next_scheduled_at, timezone) : "Checking…"}</dd>
+          </div>
+          {run?.status === "retry_wait" ? (
+            <div>
+              <dt>Next retry</dt>
+              <dd>{formatPacificDateTime(run.next_attempt_at, timezone)}</dd>
+            </div>
+          ) : null}
+          {run?.completed_at ? (
+            <div>
+              <dt>Last completed</dt>
+              <dd>{formatPacificDateTime(run.completed_at, timezone)}</dd>
+            </div>
+          ) : null}
+          {isActive ? (
+            <div>
+              <dt>Feed</dt>
+              <dd>{run?.feed}</dd>
+            </div>
+          ) : null}
+        </dl>
+      </div>
+      {failed ? (
+        <button className={styles.secondaryButton} type="button" onClick={onRetry}>
+          Retry status
+        </button>
+      ) : null}
+    </section>
+  );
+}
 
 function displayValue(value: string | null | undefined) {
   return value?.trim() || "Not provided";
@@ -158,6 +320,10 @@ export function OpportunitiesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const observedAutomaticSyncRef = useRef<
+    { id: string; status: EarlyBidSyncRunStatus } | null | undefined
+  >(undefined);
+  const pendingAutomaticSyncRefreshRef = useRef<string | null>(null);
 
   const search = searchParams.get("q") ?? "";
   const state = searchParams.get("state") ?? "";
@@ -172,6 +338,41 @@ export function OpportunitiesPage() {
     queryKey: queryKeys.leads,
     queryFn: api.listLeads,
   });
+
+  const automaticSyncQuery = useQuery({
+    queryKey: queryKeys.leadSyncStatus,
+    queryFn: api.getLeadSyncStatus,
+    refetchInterval: (query) => (
+      automaticSyncIsActive(query.state.data?.latest_run?.status) ? 5_000 : 60_000
+    ),
+  });
+  const latestAutomaticRun = automaticSyncQuery.data?.latest_run ?? null;
+
+  useEffect(() => {
+    if (!automaticSyncQuery.data) return;
+
+    const previous = observedAutomaticSyncRef.current;
+    const current = latestAutomaticRun
+      ? { id: latestAutomaticRun.id, status: latestAutomaticRun.status }
+      : null;
+    if (
+      current?.status === "succeeded"
+      && (
+        previous === undefined
+        || previous === null
+        || previous.id !== current.id
+        || previous.status !== "succeeded"
+      )
+    ) {
+      pendingAutomaticSyncRefreshRef.current = current.id;
+    }
+    observedAutomaticSyncRef.current = current;
+
+    if (pendingAutomaticSyncRefreshRef.current && leadsQuery.fetchStatus === "idle") {
+      pendingAutomaticSyncRefreshRef.current = null;
+      void queryClient.invalidateQueries({ queryKey: queryKeys.leads });
+    }
+  }, [automaticSyncQuery.data, latestAutomaticRun, leadsQuery.fetchStatus, queryClient]);
 
   const syncMutation = useMutation({
     mutationFn: () => api.syncLeads(),
@@ -227,6 +428,8 @@ export function OpportunitiesPage() {
   const clearFilters = () => setSearchParams({}, { replace: true });
   const hasFilters = Boolean(search || state || timing || outreach || searchParams.has("sort"));
   const isMutating = syncMutation.isPending || uploadMutation.isPending;
+  const automaticSyncActive = automaticSyncIsActive(latestAutomaticRun?.status);
+  const manualSyncDisabled = isMutating || automaticSyncActive;
 
   const actions = (
     <div className={styles.headerActions}>
@@ -254,13 +457,23 @@ export function OpportunitiesPage() {
       <button
         className={styles.primaryButton}
         type="button"
-        disabled={isMutating}
+        disabled={manualSyncDisabled}
+        aria-describedby="automatic-sync-status"
         onClick={() => syncMutation.mutate()}
       >
         <RefreshCw aria-hidden="true" className={syncMutation.isPending ? styles.spin : undefined} size={17} />
         {syncMutation.isPending ? "Synchronizing…" : "Sync EarlyBid"}
       </button>
     </div>
+  );
+
+  const automaticSyncPanel = (
+    <AutomaticSyncStatusPanel
+      status={automaticSyncQuery.data}
+      pending={automaticSyncQuery.isPending}
+      failed={automaticSyncQuery.isError}
+      onRetry={() => void automaticSyncQuery.refetch()}
+    />
   );
 
   if (leadsQuery.isPending) {
@@ -272,6 +485,7 @@ export function OpportunitiesPage() {
           description="Prioritized construction opportunities, ready for thoughtful outreach."
           actions={actions}
         />
+        {automaticSyncPanel}
         <LoadingState label="Loading opportunities…" />
       </div>
     );
@@ -286,6 +500,7 @@ export function OpportunitiesPage() {
           description="Prioritized construction opportunities, ready for thoughtful outreach."
           actions={actions}
         />
+        {automaticSyncPanel}
         <ErrorState
           title="Opportunities could not be loaded"
           message={errorMessage(leadsQuery.error, "Check the backend connection and try again.")}
@@ -304,6 +519,8 @@ export function OpportunitiesPage() {
         actions={actions}
       />
 
+      {automaticSyncPanel}
+
       <p className={styles.srOnly} aria-live="polite">
         {syncMutation.isPending
           ? "Synchronizing the EarlyBid feed."
@@ -320,7 +537,8 @@ export function OpportunitiesPage() {
             <button
               className={styles.primaryButton}
               type="button"
-              disabled={isMutating}
+              disabled={manualSyncDisabled}
+              aria-describedby="automatic-sync-status"
               onClick={() => syncMutation.mutate()}
             >
               <RefreshCw aria-hidden="true" size={17} />

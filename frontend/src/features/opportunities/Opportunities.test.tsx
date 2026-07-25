@@ -9,7 +9,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { api } from '../../lib/api';
 import { queryKeys } from '../../lib/queryKeys';
-import type { Email, EmailGenerationJob, Lead, LeadWorkspace } from '../../types';
+import type {
+  EarlyBidSyncRunStatus,
+  EarlyBidSyncStatus,
+  Email,
+  EmailGenerationJob,
+  Lead,
+  LeadWorkspace,
+} from '../../types';
 import { OpportunitiesPage } from './OpportunitiesPage';
 import { OpportunityDetailPage } from './OpportunityDetailPage';
 
@@ -19,6 +26,7 @@ vi.mock('../../lib/api', async (importOriginal) => {
     ...actual,
     api: {
       listLeads: vi.fn(),
+      getLeadSyncStatus: vi.fn(),
       syncLeads: vi.fn(),
       uploadLeadsCsv: vi.fn(),
       getLeadWorkspace: vi.fn(),
@@ -94,6 +102,34 @@ const workspace = (overrides: Partial<LeadWorkspace> = {}): LeadWorkspace => ({
   ...overrides,
 });
 
+const automaticSyncStatus = (
+  status: EarlyBidSyncRunStatus = 'succeeded',
+  overrides: Partial<EarlyBidSyncStatus> = {},
+): EarlyBidSyncStatus => ({
+  timezone: 'America/Los_Angeles',
+  next_scheduled_at: '2026-07-26T07:00:00Z',
+  overdue: false,
+  latest_run: {
+    id: 'sync-run-1',
+    feed: 'reseller/client',
+    schedule_date: '2026-07-25',
+    scheduled_for: '2026-07-25T07:00:00Z',
+    status,
+    attempt_count: 1,
+    error_code: null,
+    next_attempt_at: status === 'retry_wait' ? '2026-07-25T07:05:00Z' : null,
+    created: status === 'succeeded' ? 1 : 0,
+    updated: status === 'succeeded' ? 2 : 0,
+    total: status === 'succeeded' ? 3 : 0,
+    generation_queued: status === 'succeeded' ? 1 : 0,
+    claimed_at: status === 'queued' ? null : '2026-07-25T07:00:01Z',
+    completed_at: status === 'succeeded' || status === 'failed'
+      ? '2026-07-25T07:00:30Z'
+      : null,
+  },
+  ...overrides,
+});
+
 function renderAt(path: string) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -130,6 +166,7 @@ beforeEach(() => {
     lead({ id: 'lead-2', project: 'Cedar Library', location: 'Austin', state: 'TX', score: 72 }),
   ]);
   vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace());
+  vi.mocked(api.getLeadSyncStatus).mockResolvedValue(automaticSyncStatus());
   vi.mocked(api.syncLeads).mockResolvedValue({
     created: 1,
     updated: 1,
@@ -149,6 +186,34 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('Opportunities list', () => {
+  it('keeps automatic sync status visible while opportunities are loading', async () => {
+    vi.mocked(api.listLeads).mockImplementation(() => new Promise(() => undefined));
+    renderAt('/opportunities');
+
+    expect(await screen.findByRole('heading', { name: 'Last automatic sync completed' })).toBeInTheDocument();
+    expect(screen.getByText('Loading opportunities…')).toBeInTheDocument();
+  });
+
+  it('keeps automatic sync status visible when opportunities fail to load', async () => {
+    vi.mocked(api.listLeads).mockRejectedValue(new Error('lead read failed'));
+    renderAt('/opportunities');
+
+    expect(await screen.findByRole('heading', { name: 'Opportunities could not be loaded' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Last automatic sync completed' })).toBeInTheDocument();
+  });
+
+  it('keeps automatic sync status and its manual-sync guard in the empty state', async () => {
+    vi.mocked(api.listLeads).mockResolvedValue([]);
+    vi.mocked(api.getLeadSyncStatus).mockResolvedValue(automaticSyncStatus('queued'));
+    renderAt('/opportunities');
+
+    expect(await screen.findByRole('heading', { name: 'No opportunities yet' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Automatic sync queued' })).toBeInTheDocument();
+    const syncButtons = screen.getAllByRole('button', { name: 'Sync EarlyBid' });
+    expect(syncButtons).toHaveLength(2);
+    syncButtons.forEach((button) => expect(button).toBeDisabled());
+  });
+
   it('keeps search and outreach filters in the URL-backed view', async () => {
     const { user } = renderAt('/opportunities?outreach=pending_review');
     const table = await screen.findByRole('table', { name: 'EarlyBid opportunities' });
@@ -172,6 +237,101 @@ describe('Opportunities list', () => {
     const csv = new File(['Project,Location\nHarbour,Portland'], 'leads.csv', { type: 'text/csv' });
     await user.upload(screen.getByLabelText('Choose an EarlyBid CSV file'), csv);
     await waitFor(() => expect(api.uploadLeadsCsv).toHaveBeenCalledWith(csv));
+  });
+
+  it('shows the latest automatic result and next Pacific midnight without posting on mount', async () => {
+    renderAt('/opportunities');
+
+    expect(await screen.findByRole('heading', { name: 'Last automatic sync completed' })).toBeInTheDocument();
+    expect(screen.getByText('3 processed · 1 created · 2 updated · 1 drafts queued')).toBeInTheDocument();
+    expect(screen.getByText('Jul 26, 2026, 12:00 AM PDT')).toBeInTheDocument();
+    const statusRegion = screen.getByRole('heading', { name: 'Last automatic sync completed' }).closest('section');
+    expect(statusRegion).toHaveAttribute('aria-live', 'polite');
+    expect(statusRegion).toHaveAttribute('aria-atomic', 'true');
+    expect(api.getLeadSyncStatus).toHaveBeenCalledTimes(1);
+    expect(api.syncLeads).not.toHaveBeenCalled();
+  });
+
+  it('refreshes leads once when the first automatic status is already successful', async () => {
+    const { queryClient } = renderAt('/opportunities');
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries');
+
+    expect(await screen.findByRole('heading', { name: 'Last automatic sync completed' })).toBeInTheDocument();
+    await waitFor(() => expect(invalidateSpy).toHaveBeenCalledTimes(1));
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.leads });
+    await waitFor(() => expect(api.listLeads).toHaveBeenCalledTimes(2));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(api.listLeads).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['queued', 'Automatic sync queued'],
+    ['running', 'Automatic sync in progress'],
+    ['retry_wait', 'Automatic sync retry scheduled'],
+  ] as const)('disables manual sync while the daily run is %s', async (status, heading) => {
+    vi.mocked(api.getLeadSyncStatus).mockResolvedValue(automaticSyncStatus(status));
+    const { user } = renderAt('/opportunities');
+
+    expect(await screen.findByRole('heading', { name: heading })).toBeInTheDocument();
+    const syncButton = screen.getByRole('button', { name: 'Sync EarlyBid' });
+    expect(syncButton).toBeDisabled();
+    await user.click(syncButton);
+    expect(api.syncLeads).not.toHaveBeenCalled();
+    if (status === 'retry_wait') {
+      expect(screen.getByText('Jul 25, 2026, 12:05 AM PDT')).toBeInTheDocument();
+    }
+  });
+
+  it.each([
+    'queued',
+    'running',
+    'retry_wait',
+  ] as const)('keeps manual sync disabled when a %s daily run is overdue', async (status) => {
+    vi.mocked(api.getLeadSyncStatus).mockResolvedValue(automaticSyncStatus(status, { overdue: true }));
+    const intervalSpy = vi.spyOn(window, 'setInterval');
+    renderAt('/opportunities');
+
+    expect(await screen.findByText('Overdue')).toBeInTheDocument();
+    const syncButton = screen.getByRole('button', { name: 'Sync EarlyBid' });
+    expect(syncButton).toBeDisabled();
+    expect(api.syncLeads).not.toHaveBeenCalled();
+    expect(intervalSpy.mock.calls.some((call) => call[1] === 5_000)).toBe(true);
+    intervalSpy.mockRestore();
+  });
+
+  it('shows safe failure and overdue context while keeping manual sync available', async () => {
+    const failed = automaticSyncStatus('failed', { overdue: true });
+    if (failed.latest_run) {
+      failed.latest_run.error_code = 'upstream_rate_limited';
+      failed.latest_run.attempt_count = 4;
+    }
+    vi.mocked(api.getLeadSyncStatus).mockResolvedValue(failed);
+    renderAt('/opportunities');
+
+    expect(await screen.findByRole('heading', { name: 'Last automatic sync failed' })).toBeInTheDocument();
+    expect(screen.getByText('EarlyBid temporarily limited requests.')).toBeInTheDocument();
+    expect(screen.getByText('Overdue')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sync EarlyBid' })).toBeEnabled();
+  });
+
+  it('uses active and idle polling intervals and refreshes leads on automatic success', async () => {
+    vi.mocked(api.getLeadSyncStatus).mockResolvedValue(automaticSyncStatus('queued'));
+    const intervalSpy = vi.spyOn(window, 'setInterval');
+    const { queryClient } = renderAt('/opportunities');
+    await screen.findByRole('heading', { name: 'Automatic sync queued' });
+    await waitFor(() => expect(intervalSpy.mock.calls.some((call) => call[1] === 5_000)).toBe(true));
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries');
+
+    act(() => {
+      queryClient.setQueryData(queryKeys.leadSyncStatus, automaticSyncStatus('succeeded'));
+    });
+
+    expect(await screen.findByRole('heading', { name: 'Last automatic sync completed' })).toBeInTheDocument();
+    await waitFor(() => expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.leads }));
+    await waitFor(() => expect(intervalSpy.mock.calls.some((call) => call[1] === 60_000)).toBe(true));
+    intervalSpy.mockRestore();
   });
 });
 
