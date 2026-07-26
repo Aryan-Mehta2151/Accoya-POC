@@ -34,6 +34,7 @@ from app.db.models import (
     EmailStatus,
     EmailStatusEvent,
     Lead,
+    User,
 )
 from app.email_content import email_content_hash
 from app.schemas.email import EmailStatusUpdate
@@ -181,7 +182,7 @@ class PostgresEmailDeliveryTests(unittest.TestCase):
         with self.engine.connect() as connection:
             self.assertEqual(
                 set(database.get_current_schema_heads(connection)),
-                {"0006_email_delivery_queue"},
+                {"0007_web_auth_security"},
             )
 
         inspector = inspect(self.engine)
@@ -488,6 +489,11 @@ class PostgresEmailDeliveryTests(unittest.TestCase):
         self.assertEqual(active_generations + active_deliveries, 1)
 
     def test_smtp_success_keeps_status_event_chain_contiguous(self) -> None:
+        current_user = User(
+            id=str(uuid.uuid4()),
+            email="postgres-reviewer@example.com",
+            is_active=True,
+        )
         _, email_id = self._seed_email(
             "postgres-delivery-events",
             status=EmailStatus.pending_review,
@@ -497,8 +503,8 @@ class PostgresEmailDeliveryTests(unittest.TestCase):
                 email_id,
                 EmailStatusUpdate(
                     status=EmailStatus.approved,
-                    actor="postgres-reviewer",
                 ),
+                current_user,
                 db,
             )
             self.assertEqual(updated.status, EmailStatus.approved)
@@ -544,7 +550,7 @@ class PostgresEmailDeliveryTests(unittest.TestCase):
         )
         self.assertEqual(
             transitions[EmailStatus.approved],
-            (EmailStatus.pending_review, "postgres-reviewer"),
+            (EmailStatus.pending_review, str(current_user.id)),
         )
         self.assertEqual(
             transitions[EmailStatus.sent],

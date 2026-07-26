@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.routes.auth import get_current_user
+from app.api.dependencies.auth import get_current_user
 from app.config import get_settings
 from app.db.database import get_db
 from app.db.models import Email, EmailStatus, EmailStatusEvent, User
@@ -135,6 +135,7 @@ def get_email(email_id: str, db: Session = Depends(get_db)):
 def edit_email(
     email_id: str,
     payload: EmailEdit,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     email = db.scalar(
@@ -181,7 +182,7 @@ def edit_email(
                 email_id=email.id,
                 previous_status=EmailStatus.approved,
                 new_status=EmailStatus.pending_review,
-                actor="system:approved_email_edited",
+                actor=str(current_user.id),
             )
         )
 
@@ -193,6 +194,7 @@ def edit_email(
 def update_status(
     email_id: str,
     payload: EmailStatusUpdate,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     email = db.scalar(
@@ -233,7 +235,7 @@ def update_status(
             email_id=email.id,
             previous_status=previous_status,
             new_status=payload.status,
-            actor=payload.actor,
+            actor=str(current_user.id),
         )
     )
     db.commit()

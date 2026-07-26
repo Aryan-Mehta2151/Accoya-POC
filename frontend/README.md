@@ -14,13 +14,16 @@ npm run dev
 
 Vite serves the application at `http://localhost:5173`. Start the backend separately at `http://localhost:8000`.
 
-The API prefix defaults to `http://localhost:8000/api`. To use another backend, create an untracked `.env.local`:
+In development the API defaults to port 8000 on the page's current hostname. Use `localhost` for both processes or `127.0.0.1` for both so the SameSite authentication cookies are sent. To use another backend, create an untracked `.env.local`:
 
 ```dotenv
 VITE_API_BASE_URL=http://localhost:8000/api
 ```
 
 Include the backend API prefix in the value.
+Production builds default to the same-origin `/api` path; keep the SPA and API
+on one HTTPS hostname. Serve the SPA entry HTML with `Cache-Control: no-store`
+so an old Bearer-token bundle cannot survive the cookie-auth cutover.
 
 ## Product areas
 
@@ -32,7 +35,7 @@ Include the backend API prefix in the value.
 
 The frontend intentionally does not expose agent runs, model details, prompt versions, token usage, traces, or telemetry. The backend may persist those details internally.
 
-Each generated draft snapshots the opportunity's recipient address. The To field remains editable, including when the opportunity has no address; changing an approved recipient or message returns the draft to review. Send Email is available only for the current approved draft, confirms the exact recipient and subject, and submits a JWT-authenticated durable delivery request. The browser polls queued/running deliveries and distinguishes confirmed relay acceptance, definite failure, and an unknown outcome. Unknown deliveries are never resent automatically because the first attempt may already have been accepted; an explicit resend requires acknowledging the duplicate risk.
+Each generated draft snapshots the opportunity's recipient address. The To field remains editable, including when the opportunity has no address; changing an approved recipient or message returns the draft to review. Send Email is available only for the current approved draft, confirms the exact recipient and subject, and submits an authenticated durable delivery request. The browser polls queued/running deliveries and distinguishes confirmed relay acceptance, definite failure, and an unknown outcome. Unknown deliveries are never resent automatically because the first attempt may already have been accepted; an explicit resend requires acknowledging the duplicate risk.
 
 The separately started backend delivery worker performs SMTP delivery. A `sent` state means the configured SMTP relay accepted the message, not that it reached the recipient's inbox. Starting that worker can send live external email; automated frontend tests mock delivery and never contact SMTP. Uploading a strategy document stores it, but the backend does not expose knowledge-base ingestion status.
 
@@ -46,7 +49,7 @@ The separately started backend delivery worker performs SMTP delivery. A `sent` 
 - `src/styles/global.css` contains the design tokens, reset, and global controls.
 - Feature presentation is isolated with CSS Modules.
 
-The app uses a React Router data router so unsaved outreach edits, including the To field, can block navigation. TanStack Query owns remote state: GET requests retry once, while mutations never retry automatically. Only the Send Email request adds the stored JWT Bearer token; the other business API routes retain their current unauthenticated behavior.
+The app uses a React Router data router so unsaved outreach edits, including the To field, can block navigation. TanStack Query owns remote state: GET requests retry once, while mutations never retry automatically. A single authentication provider verifies the session with `/auth/me`. The backend stores the eight-hour JWT in an HttpOnly cookie; frontend JavaScript keeps only the CSRF token in memory. Every business request includes credentials and every unsafe request sends `X-CSRF-Token`.
 
 The assistant keeps only its current Bedrock session identifier in `sessionStorage`. It restores messages through the backend history endpoint when the page reloads.
 

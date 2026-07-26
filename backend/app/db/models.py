@@ -837,9 +837,6 @@ class User(Base):
     """User account for authentication."""
 
     __tablename__ = "users"
-    __table_args__ = (
-        UniqueConstraint("email", name="uq_users_email"),
-    )
 
     id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
     email: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -847,6 +844,17 @@ class User(Base):
     password_hash: Mapped[str | None] = mapped_column(String(255))
     oauth_provider: Mapped[str | None] = mapped_column(String(50))  # "google"
     oauth_id: Mapped[str | None] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    auth_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -859,13 +867,49 @@ class User(Base):
         onupdate=func.now(),
     )
 
+    __table_args__ = (
+        UniqueConstraint("email", name="uq_users_email"),
+        UniqueConstraint(
+            "oauth_provider",
+            "oauth_id",
+            name="uq_users_oauth_provider_id",
+        ),
+        CheckConstraint(
+            "(oauth_provider IS NULL AND oauth_id IS NULL) OR "
+            "(oauth_provider IS NOT NULL AND oauth_id IS NOT NULL "
+            "AND length(trim(oauth_provider)) > 0 "
+            "AND length(trim(oauth_id)) > 0)",
+            name="ck_users_oauth_identity_complete",
+        ),
+        CheckConstraint(
+            "email = lower(trim(email)) AND length(trim(email)) > 0",
+            name="ck_users_email_normalized",
+        ),
+        CheckConstraint(
+            "auth_version >= 0",
+            name="ck_users_auth_version_nonnegative",
+        ),
+        Index(
+            "uq_users_email_normalized",
+            func.lower(email),
+            unique=True,
+        ),
+    )
+
 
 class PasswordResetToken(Base):
     """Password reset tokens for email-based authentication."""
 
     __tablename__ = "password_reset_tokens"
     __table_args__ = (
-        UniqueConstraint("token", name="uq_password_reset_tokens_token"),
+        UniqueConstraint(
+            "token_hash",
+            name="uq_password_reset_tokens_token_hash",
+        ),
+        CheckConstraint(
+            "length(token_hash) = 64",
+            name="ck_password_reset_tokens_hash_sha256",
+        ),
         Index("ix_password_reset_tokens_user_id", "user_id"),
     )
 
@@ -875,7 +919,7 @@ class PasswordResetToken(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    token: Mapped[str] = mapped_column(String(255), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

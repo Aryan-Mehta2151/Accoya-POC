@@ -128,6 +128,7 @@ class EmailDeliveryApiTests(unittest.TestCase):
             return str(email.id)
 
     def test_edit_recipient_blank_clears_and_approved_edit_requires_review(self):
+        self._authorize()
         email_id = self._seed_email(status=EmailStatus.approved)
         response = self.client.patch(
             f"/api/emails/{email_id}",
@@ -147,8 +148,10 @@ class EmailDeliveryApiTests(unittest.TestCase):
                 .limit(1)
             )
             self.assertEqual(event.previous_status, EmailStatus.approved)
+            self.assertEqual(event.actor, str(self.user.id))
 
     def test_invalid_recipient_edit_is_rejected(self) -> None:
+        self._authorize()
         email_id = self._seed_email()
         response = self.client.patch(
             f"/api/emails/{email_id}",
@@ -157,6 +160,7 @@ class EmailDeliveryApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
 
     def test_approval_requires_valid_recipient_and_nonblank_body(self) -> None:
+        self._authorize()
         missing_recipient_id = self._seed_email(recipient_email=None)
         response = self.client.post(
             f"/api/emails/{missing_recipient_id}/status",
@@ -188,6 +192,7 @@ class EmailDeliveryApiTests(unittest.TestCase):
         self.assertEqual(response.json()["detail"]["code"], "subject_invalid")
 
     def test_terminal_and_historical_emails_are_read_only(self) -> None:
+        self._authorize()
         rejected_id = self._seed_email(
             status=EmailStatus.rejected,
             external_id="rejected-read-only",
@@ -252,7 +257,6 @@ class EmailDeliveryApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"]["code"], "email_not_current")
 
-        self._authorize()
         historical_payload = self.client.get(
             f"/api/emails/{historical_id}"
         ).json()
@@ -270,6 +274,7 @@ class EmailDeliveryApiTests(unittest.TestCase):
         self.assertEqual(response.json()["detail"]["code"], "email_not_current")
 
     def test_direct_sent_transition_is_forbidden(self) -> None:
+        self._authorize()
         for existing_status in (EmailStatus.approved, EmailStatus.sent):
             with self.subTest(existing_status=existing_status):
                 email_id = self._seed_email(
@@ -285,6 +290,47 @@ class EmailDeliveryApiTests(unittest.TestCase):
                     response.json()["detail"]["code"],
                     "sent_requires_delivery",
                 )
+
+    def test_review_actor_is_always_the_authenticated_user(self) -> None:
+        self._authorize()
+        email_id = self._seed_email()
+
+        response = self.client.post(
+            f"/api/emails/{email_id}/status",
+            json={"status": "approved", "actor": "spoofed-client"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        with self.session_factory() as db:
+            event = db.scalar(
+                select(EmailStatusEvent)
+                .where(
+                    EmailStatusEvent.email_id == email_id,
+                    EmailStatusEvent.new_status == EmailStatus.approved,
+                )
+                .order_by(EmailStatusEvent.created_at.desc())
+                .limit(1)
+            )
+            self.assertEqual(event.actor, str(self.user.id))
+
+    def test_edit_and_review_require_authentication(self) -> None:
+        email_id = self._seed_email()
+
+        edited = self.client.patch(
+            f"/api/emails/{email_id}",
+            json={"body": "Unauthenticated edit"},
+        )
+        reviewed = self.client.post(
+            f"/api/emails/{email_id}/status",
+            json={"status": "approved"},
+        )
+
+        self.assertEqual(edited.status_code, 401)
+        self.assertEqual(reviewed.status_code, 401)
+        with self.session_factory() as db:
+            email = db.get(Email, email_id)
+            self.assertEqual(email.body, "Generated body")
+            self.assertEqual(email.status, EmailStatus.pending_review)
 
     def test_send_requires_authentication_before_queueing(self) -> None:
         email_id = self._seed_email(status=EmailStatus.approved)

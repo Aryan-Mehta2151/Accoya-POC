@@ -1,93 +1,79 @@
-import { useEffect, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useEffect, useRef } from 'react';
+import { Link, Navigate, useSearchParams } from 'react-router-dom';
+import { useAuth } from '../../hooks/useAuth';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
+function callbackDestination(): string {
+  try {
+    const stored = window.sessionStorage.getItem('accoya-auth-return-to');
+    if (stored?.startsWith('/') && !stored.startsWith('//')) return stored;
+  } catch {
+    // Fall back to the application home when browser storage is unavailable.
+  }
+  return '/';
+}
 
 export function CallbackPage() {
   const [searchParams] = useSearchParams();
-  const navigate = useNavigate();
-  const [error, setError] = useState('');
+  const { announceSessionChanged, status, retryVerification } = useAuth();
+  const announcedRef = useRef(false);
+  const oauthError = searchParams.get('error');
 
   useEffect(() => {
-    const token = searchParams.get('token');
-    const oauthError = searchParams.get('error');
-
-    if (oauthError) {
-      setError(
-        oauthError === 'access_denied'
-          ? 'Google sign-in was cancelled.'
-          : 'Google sign-in could not be completed.',
-      );
-      const redirectTimer = window.setTimeout(() => navigate('/login'), 2000);
-      return () => window.clearTimeout(redirectTimer);
+    if (!oauthError && status === 'authenticated' && !announcedRef.current) {
+      announcedRef.current = true;
+      announceSessionChanged();
     }
+  }, [announceSessionChanged, oauthError, status]);
 
-    if (!token) {
-      setError('No token received from authentication');
-      const redirectTimer = window.setTimeout(() => navigate('/login'), 2000);
-      return () => window.clearTimeout(redirectTimer);
-    }
+  if (oauthError) {
+    return (
+      <main style={{ display: 'grid', placeItems: 'center', minHeight: '100vh', padding: '24px' }}>
+        <div style={{ textAlign: 'center' }}>
+          <h1>Google sign-in failed</h1>
+          <p>
+            {oauthError === 'access_denied'
+              ? 'Google sign-in was cancelled.'
+              : 'Google sign-in could not be completed.'}
+          </p>
+          <Link to='/login'>Return to sign in</Link>
+        </div>
+      </main>
+    );
+  }
 
-    // Store token and redirect
-    try {
-      localStorage.setItem('access_token', token);
-      
-      // Fetch user info from /api/auth/me endpoint
-      const fetchUserInfo = async () => {
-        const res = await fetch(`${API_BASE_URL}/auth/me`, {
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
-        
-        if (res.ok) {
-          const user = await res.json();
-          localStorage.setItem('user', JSON.stringify(user));
-          navigate('/');
-        } else {
-          // Still redirect even if we can't fetch user info
-          navigate('/');
-        }
-      };
-      
-      fetchUserInfo();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to process authentication');
-      setTimeout(() => navigate('/login'), 2000);
-    }
-  }, [searchParams, navigate]);
+  if (status === 'authenticated') {
+    return <Navigate to={callbackDestination()} replace />;
+  }
+
+  if (status === 'verification_error') {
+    return (
+      <main style={{ display: 'grid', placeItems: 'center', minHeight: '100vh', padding: '24px' }}>
+        <div style={{ textAlign: 'center' }}>
+          <h1>We could not verify your sign-in</h1>
+          <p>Check your connection and retry the secure session check.</p>
+          <button type='button' className='primaryButton' onClick={() => void retryVerification()}>
+            Retry
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  if (status === 'anonymous') {
+    return (
+      <main style={{ display: 'grid', placeItems: 'center', minHeight: '100vh', padding: '24px' }}>
+        <div style={{ textAlign: 'center' }}>
+          <h1>Sign-in was not completed</h1>
+          <p>Your session is not active. Please try signing in again.</p>
+          <Link to='/login'>Return to sign in</Link>
+        </div>
+      </main>
+    );
+  }
 
   return (
-    <div style={{ 
-      display: 'flex', 
-      justifyContent: 'center', 
-      alignItems: 'center', 
-      minHeight: '100vh',
-      flexDirection: 'column',
-      gap: '20px'
-    }}>
-      {error ? (
-        <div style={{ textAlign: 'center' }}>
-          <p style={{ color: '#dc2626' }}>Error: {error}</p>
-          <p style={{ color: '#6b7280' }}>Redirecting to login...</p>
-        </div>
-      ) : (
-        <div style={{ textAlign: 'center' }}>
-          <p>Signing you in...</p>
-          <div style={{ 
-            marginTop: '20px',
-            width: '40px',
-            height: '40px',
-            border: '4px solid #e5e7eb',
-            borderTop: '4px solid #3b82f6',
-            borderRadius: '50%',
-            animation: 'spin 1s linear infinite',
-          }} />
-        </div>
-      )}
-      <style>{`
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
-      `}</style>
-    </div>
+    <main style={{ display: 'grid', placeItems: 'center', minHeight: '100vh' }}>
+      <p>Verifying your secure session...</p>
+    </main>
   );
 }

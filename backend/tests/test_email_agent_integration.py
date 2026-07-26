@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import os
 import unittest
+import uuid
 from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
@@ -20,7 +21,7 @@ from agent.models import GenerationResult, GenerationStatus
 from app.api.routes import emails
 from app.config import get_settings
 from app.db.database import Base, get_db
-from app.db.models import AgentRun, AgentRunStatus, Email, EmailStatus, Lead
+from app.db.models import AgentRun, AgentRunStatus, Email, EmailStatus, Lead, User
 from app.services import agent_run_service, email_generator
 
 
@@ -87,9 +88,17 @@ class EmailAgentIntegrationTests(unittest.TestCase):
             expire_on_commit=False,
         )
         self.agent = FakeAgent()
+        self.current_user = User(
+            id=str(uuid.uuid4()),
+            email="reviewer@example.com",
+            is_active=True,
+        )
         app = FastAPI()
         app.include_router(emails.router, prefix="/api")
         app.dependency_overrides[get_db] = self._get_db
+        app.dependency_overrides[emails.get_current_user] = (
+            lambda: self.current_user
+        )
         app.dependency_overrides[
             email_generator.get_accoya_email_agent
         ] = lambda: self.agent
@@ -371,11 +380,21 @@ class AgentRouteRegistrationTests(unittest.TestCase):
                 get_settings.cache_clear()
                 production_main = importlib.reload(main)
                 production_paths = set(production_main.app.openapi()["paths"])
+                production_registered_paths = {
+                    route.path
+                    for route in production_main.app.routes
+                    if hasattr(route, "path")
+                }
 
             with patch.dict(os.environ, {"APP_ENV": "development"}):
                 get_settings.cache_clear()
                 development_main = importlib.reload(main)
                 development_paths = set(development_main.app.openapi()["paths"])
+                development_registered_paths = {
+                    route.path
+                    for route in development_main.app.routes
+                    if hasattr(route, "path")
+                }
 
             self.assertFalse(
                 any(path.startswith("/api/agent/") for path in production_paths)
@@ -385,6 +404,16 @@ class AgentRouteRegistrationTests(unittest.TestCase):
             )
             self.assertTrue(
                 any(path.startswith("/api/agent-runs") for path in production_paths)
+            )
+            self.assertTrue(
+                {"/docs", "/redoc", "/openapi.json"}.isdisjoint(
+                    production_registered_paths
+                )
+            )
+            self.assertTrue(
+                {"/docs", "/redoc", "/openapi.json"}.issubset(
+                    development_registered_paths
+                )
             )
         finally:
             get_settings.cache_clear()

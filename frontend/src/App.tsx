@@ -1,4 +1,9 @@
-import { createBrowserRouter, RouterProvider, Navigate } from 'react-router-dom';
+import {
+  createBrowserRouter,
+  Navigate,
+  RouterProvider,
+  useLocation,
+} from 'react-router-dom';
 import { Toaster } from 'sonner';
 import { AppShell } from './app/AppShell';
 import { NotFoundPage } from './app/NotFoundPage';
@@ -17,14 +22,30 @@ import { useAuth } from './hooks/useAuth';
 
 // Protected route wrapper
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useAuth();
+  const { status, retryVerification } = useAuth();
+  const location = useLocation();
 
-  if (loading) {
+  if (status === 'checking') {
     return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>Loading...</div>;
   }
 
-  if (!user) {
-    return <Navigate to="/login" replace />;
+  if (status === 'verification_error') {
+    return (
+      <div style={{ display: 'grid', placeItems: 'center', minHeight: '100vh', padding: '24px' }}>
+        <div style={{ maxWidth: '440px', textAlign: 'center' }}>
+          <h1>We could not verify your session</h1>
+          <p>Check your connection and try again. Your account has not been signed out.</p>
+          <button type='button' className='primaryButton' onClick={() => void retryVerification()}>
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (status === 'anonymous') {
+    const returnTo = `${location.pathname}${location.search}${location.hash}`;
+    return <Navigate to='/login' replace state={{ from: returnTo }} />;
   }
 
   return children;

@@ -4,9 +4,9 @@ A proof of concept that ingests EarlyBid construction opportunities manually
 or on a durable daily schedule, queues personalized Accoya nurturing emails for
 background generation, supports human review on each opportunity, manages
 strategy documents, durably delivers approved outreach through SMTP, and
-provides a knowledge-base chatbot. The real-send endpoint requires the
-browser's JWT; most lead, email-review, document, and chat routes remain
-unauthenticated, so do not expose this POC publicly.
+provides a knowledge-base chatbot. Every business API route requires an active,
+administrator-provisioned user session. The browser carries an eight-hour JWT
+in an HttpOnly cookie and sends a separate CSRF token on mutating requests.
 
 The backend separates requested work from provider execution. Every generation
 request is first represented by a durable `email_generation_jobs` record, and
@@ -112,23 +112,32 @@ out of `.env.example` and other tracked files:
 DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/ai_marketing
 ```
 
-Generate a local JWT signing secret:
+Generate independent local JWT and CSRF signing secrets:
 
 ```powershell
+python -c "import secrets; print(secrets.token_urlsafe(48))"
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
 Copy the printed value into `backend/.env` and keep the local frontend URL:
 
 ```dotenv
-JWT_SECRET_KEY=replace-with-the-generated-value
+JWT_SECRET_KEY=replace-with-the-first-generated-value
+CSRF_SECRET_KEY=replace-with-the-second-generated-value
+JWT_ISSUER=accoya-api
+JWT_AUDIENCE=accoya-web
+AUTH_COOKIE_SECURE=false
+CORS_ALLOWED_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
 FRONTEND_URL=http://localhost:5173
+GOOGLE_REDIRECT_URI=http://localhost:8000/api/auth/callback/google
 ```
 
-Email/password signup and login then work locally without Google or SMTP
-credentials. Password-reset email requires the SMTP settings described below.
-Google sign-in additionally requires Google OAuth credentials and the exact
-local callback `http://localhost:8000/api/auth/callback/google`.
+Application startup rejects blank or weak authentication secrets. Secure
+cookies are mandatory outside development. Password-reset email requires the
+SMTP settings described below. Google sign-in additionally requires Google
+OAuth credentials and the configured callback URI. Open local frontend and API
+URLs through the same hostname: use `localhost` for both or `127.0.0.1` for
+both.
 
 Then create the database, if needed, and migrate it to the current Alembic
 head:
@@ -146,6 +155,72 @@ Application startup never creates or upgrades tables. It checks connectivity
 and requires the database revision to exactly match the repository's Alembic
 head; a missing or stale schema fails startup with an instruction to run the
 bootstrap command.
+
+Create the first approved user after migration. Passwords are read from a
+hidden interactive prompt and must never be placed on the command line:
+
+```powershell
+python -m app.auth.admin create --email admin@example.com --name "Admin User"
+# Or approve a new account that can authenticate only through Google:
+python -m app.auth.admin create --email google.user@example.com --google-only
+```
+
+Other account-management commands are `list`, `enable`, `disable`,
+`set-password`, and `revoke-sessions`. A migrated account needs both
+`set-password` and `enable` before password login; use `create --google-only`
+for a new account that must link a verified matching Google identity on first
+login. There is no public signup endpoint or browser administration API.
+
+Google OAuth is optional in development. To run with email/password login
+only, leave `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` blank. Create the
+account with the password-based `admin create` command above. Password reset
+email is also optional for local login; when SMTP is not configured, an
+administrator can assign a new password from `backend/`:
+
+```powershell
+python -m app.auth.admin set-password --email admin@example.com
+```
+
+### Returning developer quick start
+
+After the one-time installation and `.env` setup are complete, use this
+short workflow whenever you return to the project. First ensure the PostgreSQL
+server referenced by `DATABASE_URL` is running. If you use this repository's
+Docker Compose database, start it from the repository root:
+
+```powershell
+docker compose up -d
+```
+
+Terminal 1 — migrate if necessary and start FastAPI:
+
+```powershell
+cd backend
+.\.venv\Scripts\Activate.ps1
+python -m app.db.bootstrap
+python -m uvicorn app.main:app --reload
+```
+
+Terminal 2 — start the React frontend:
+
+```powershell
+cd frontend
+npm run dev
+```
+
+Open `http://localhost:5173` and sign in with the provisioned email/password.
+The backend health endpoint is `http://localhost:8000/health`, and development
+API documentation is at `http://localhost:8000/docs`. Use `localhost` for both
+the frontend and backend rather than mixing it with `127.0.0.1`, because the
+session cookie relies on matching sites. Press Ctrl+C in each terminal to stop
+the web processes. `docker compose stop` stops the Compose database without
+deleting its stored data.
+
+The three workers are not required for login, page navigation, or ordinary API
+smoke testing. Start only the workers for features you intentionally want to
+exercise, using the commands and safety notes below. In particular, the
+delivery worker can send real queued email, and the EarlyBid worker can make
+live feed requests.
 
 ### 2. Start FastAPI
 
@@ -242,22 +317,23 @@ npm ci
 npm run dev
 ```
 
-Open `http://localhost:5173`. Browser requests default to
-`http://localhost:8000/api`; set `VITE_API_BASE_URL` to override the complete
-API base, including the prefix. FastAPI allows the local `localhost` and
-`127.0.0.1` Vite origins on port 5173.
+Open `http://localhost:5173`. In development, browser requests default to port
+8000 on the page's current hostname; set `VITE_API_BASE_URL` to override the
+complete API base, including the prefix. FastAPI allows the local `localhost`
+and `127.0.0.1` Vite origins on port 5173, but do not mix those hostnames because
+SameSite cookies will not cross between them. A production build defaults to
+the same-origin `/api` path.
 
-Create an account with the email/password signup form on `/login`, then use
-that account to enter the application. The JWT is stored by the browser for UI
-session state and sent as a Bearer token for the real-send request. That
-endpoint is the only core business API route protected by the JWT, so login is
-not a production authorization boundary for the rest of this POC.
+Sign in with an administrator-provisioned account. The JWT is an eight-hour
+HttpOnly cookie and is never exposed to frontend JavaScript or browser storage.
+All business requests include the cookie, and every mutation also carries an
+in-memory CSRF token. The UI clears private query data at the verified expiry,
+revalidates when a tab regains focus, and reconciles login/logout changes across
+tabs. Logging out revokes all current sessions for the account.
 
-Google sign-in is currently local-development-specific: the frontend client ID
-and the frontend/backend callback URLs are hardcoded in the authentication
-implementation. Environment variables alone are not sufficient to move Google
-OAuth to another host. Use email/password locally unless those values match
-your Google OAuth application.
+Google sign-in starts at the backend and is available only for an existing,
+active account with a verified matching Google email. Configure the Google
+client ID, secret, and callback URI; Google never creates an application user.
 
 An empty database is a valid starting point, so opportunities and agent-run API
 lists remain empty until data is ingested. Newly inserted opportunities queue
@@ -274,7 +350,7 @@ directory.
 
 | Area | Variables | Behavior |
 | --- | --- | --- |
-| Application | `APP_ENV`, `API_PREFIX` | The default prefix is `/api`. Raw `/api/agent/*` diagnostics are registered only when `APP_ENV=development`. |
+| Application | `APP_ENV`, `API_PREFIX`, `CORS_ALLOWED_ORIGINS` | The default prefix is `/api`. `APP_ENV` fails closed to an unset, hardened mode; set `development` or `production` explicitly. Raw `/api/agent/*` diagnostics and API docs require exact `development`. CORS values must be canonical origins without a trailing slash and must include `FRONTEND_URL`. |
 | PostgreSQL | `DATABASE_URL` | Must be a PostgreSQL SQLAlchemy URL with a database name. The local Docker setup targets port 5432 and database `ai_marketing`. |
 | AWS | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | The region must contain the configured KB and S3 resources. Leave explicit keys blank to use boto3's normal credential chain or an IAM role. |
 | Strategy documents | `S3_BUCKET_STRATEGY_DOCS` | Required for document upload, list, and delete operations. |
@@ -285,10 +361,10 @@ directory.
 | Delivery worker | `EMAIL_DELIVERY_WORKER_POLL_SECONDS`, `EMAIL_DELIVERY_HEARTBEAT_SECONDS`, `EMAIL_DELIVERY_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. Keep the stale threshold comfortably above the heartbeat interval. |
 | EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Configures Bearer-authenticated manual and scheduled feed sync. The reseller/client scope is also part of the derived identity for rows without a source ID. |
 | Daily sync worker | `LEAD_AUTO_SYNC_TIMEZONE`, `LEAD_AUTO_SYNC_POLL_SECONDS`, `LEAD_AUTO_SYNC_HEARTBEAT_SECONDS`, `LEAD_AUTO_SYNC_STALE_SECONDS` | Defaults to `America/Los_Angeles`, 30, 15, and 300 seconds. The timezone must be an IANA name and the stale threshold must exceed the heartbeat interval. |
-| Authentication | `JWT_SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `FRONTEND_URL` | Set a strong local JWT secret before signup. The access-token default is 1,440 minutes and the frontend defaults to `http://localhost:5173`. The real-send endpoint requires this JWT; other core business routes remain unprotected. |
-| Google OAuth | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Optional. The current frontend client ID and local callback URLs are also hardcoded in code, so these settings alone do not make Google OAuth portable. |
-| SMTP | `SMTP_HOST`, `SMTP_PORT`, `SMTP_EMAIL`, `SMTP_PASSWORD`, `SMTP_TIMEOUT_SECONDS`, `PASSWORD_RESET_TOKEN_EXPIRE_MINUTES` | Required to start the delivery worker and optional for password reset. SMTP defaults to Gmail on port 587, the request timeout defaults to 30 seconds, and reset tokens default to 15 minutes. |
-| Frontend | `VITE_API_BASE_URL` | Optional full browser API base; include `/api` unless `API_PREFIX` changes. |
+| Authentication | `JWT_SECRET_KEY`, `CSRF_SECRET_KEY`, `JWT_ISSUER`, `JWT_AUDIENCE`, `AUTH_COOKIE_SECURE`, `FRONTEND_URL` | JWT and CSRF secrets must each contain at least 32 bytes. Sessions last eight hours. Production requires HTTPS, secure cookies, and one frontend/API hostname so SameSite=Lax cookies work. All business routes require an active provisioned user. |
+| Google OAuth | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` | Password alternative for active approved users. Production requires both credentials and the exact `${API_PREFIX}/auth/callback/google` URL. The backend uses state and PKCE and never places a JWT in a redirect URL. |
+| SMTP | `SMTP_HOST`, `SMTP_PORT`, `SMTP_EMAIL`, `SMTP_PASSWORD`, `SMTP_TIMEOUT_SECONDS`, `PASSWORD_RESET_TOKEN_EXPIRE_MINUTES` | Required in production for password recovery and by the delivery worker. SMTP defaults to Gmail on port 587, the request timeout defaults to 30 seconds, and reset tokens default to 15 minutes. Reset-delivery failures produce a safe server error log without the account identity. |
+| Frontend | `VITE_API_BASE_URL` | Optional full browser API base; include `/api` unless `API_PREFIX` changes. Development defaults to port 8000 on the page hostname; production defaults to same-origin `/api`. |
 
 Settings and the configured email agent are process-cached. Restart FastAPI
 and all three workers after changing environment values.
@@ -313,6 +389,9 @@ schema. It imports no old records and intentionally has no backfill path:
   only the configured feed's current-day slot.
 - `0006_email_delivery_queue` adds durable outbound delivery jobs. Applying it
   sends no mail; only the separately started delivery worker contacts SMTP.
+- `0007_web_auth_security` normalizes account identities, disables legacy
+  accounts until an administrator enables them, adds session revocation state,
+  and invalidates legacy password-reset tokens. It does not create users.
 
 PostgreSQL stores identifiers as native `UUID`, flexible source data as
 `JSONB`, timestamps as timezone-aware `TIMESTAMPTZ`, and agent/email lifecycle
@@ -452,12 +531,14 @@ ID. ORM internals and arbitrary raw feed fields are never added to the prompt.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | Process health after successful database/schema startup |
-| POST | `/api/auth/signup` | Create an email/password user and return a JWT |
-| POST | `/api/auth/login` | Authenticate an email/password user and return a JWT |
-| GET | `/api/auth/callback/google` | Complete the local Google OAuth redirect flow |
+| GET | `/api/auth/csrf` | Issue the cookie-bound CSRF token used by unsafe requests |
+| POST | `/api/auth/login` | Authenticate an approved user and set the HttpOnly session cookie |
+| POST | `/api/auth/logout` | Revoke the account's sessions and clear authentication cookies |
+| GET | `/api/auth/google/start` | Begin the state- and PKCE-protected Google flow |
+| GET | `/api/auth/callback/google` | Validate Google and establish the cookie session |
 | POST | `/api/auth/forgot-password` | Create a reset token and attempt an SMTP reset email |
 | POST | `/api/auth/reset-password` | Consume a reset token and replace the password |
-| GET | `/api/auth/me` | Read the JWT-authenticated user |
+| GET | `/api/auth/me` | Read the cookie-authenticated user |
 | POST | `/api/leads/sync` | Fetch and upsert the configured EarlyBid feed |
 | GET | `/api/leads/sync-status` | Read daily schedule and latest durable run status without syncing |
 | POST | `/api/leads/upload-csv` | Normalize and upsert an uploaded feed CSV |
@@ -473,7 +554,7 @@ ID. ORM internals and arbitrary raw feed fields are never added to the prompt.
 | GET | `/api/emails/{email_id}` | Read one email for deep-link compatibility |
 | PATCH | `/api/emails/{email_id}` | Edit the mutable recipient, subject, or body |
 | POST | `/api/emails/{email_id}/status` | Update review status and append an audit event; clients cannot set `sent` |
-| POST | `/api/emails/{email_id}/send` | JWT-authenticated, idempotent queueing of real SMTP delivery |
+| POST | `/api/emails/{email_id}/send` | Authenticated, idempotent queueing of real SMTP delivery |
 | POST | `/api/documents/upload` | Upload a strategy document to S3 and save metadata |
 | GET | `/api/documents` | List strategy documents from S3 |
 | DELETE | `/api/documents/{doc_id}` | Delete an S3 document and best-effort metadata record |
@@ -532,8 +613,8 @@ responses.
 
 ### Durable outbound email delivery
 
-`POST /api/emails/{email_id}/send` requires a valid Bearer JWT and a configured
-nonblank JWT secret. It accepts a caller-generated UUID idempotency key, the
+`POST /api/emails/{email_id}/send` requires the valid HttpOnly session cookie
+and CSRF header. It accepts a caller-generated UUID idempotency key, the
 current delivery-content SHA-256 hash, and an optional duplicate-risk
 acknowledgement. It returns HTTP 202 with the existing or newly queued delivery
 summary. The current approved email, its saved recipient/subject/body, and the
@@ -637,7 +718,7 @@ whose name ends in `_test`:
 ```powershell
 # From backend/; the local Docker PostgreSQL instance listens on port 5432.
 $env:ACCOYA_TEST_DATABASE_URL="postgresql+psycopg2://postgres:postgres@localhost:5432/ai_marketing_test"
-python -m unittest tests.test_postgres_agent_database tests.test_postgres_email_delivery -v
+python -m unittest tests.test_postgres_auth_migration tests.test_postgres_agent_database tests.test_postgres_email_delivery -v
 Remove-Item Env:ACCOYA_TEST_DATABASE_URL
 ```
 
@@ -650,11 +731,110 @@ checked with:
 python -m alembic check
 ```
 
+## Authentication production cutover
+
+Treat `0007_web_auth_security`, the API, frontend, and three workers as one
+coordinated release. Run this read-only identity inventory against the target
+database first; resolve every row it returns instead of guessing which account
+to merge:
+
+```sql
+SELECT id,
+       lower(btrim(email)) AS normalized_email,
+       password_hash IS NOT NULL AS had_password,
+       oauth_provider IS NOT NULL AS had_oauth
+FROM users
+ORDER BY normalized_email;
+
+SELECT lower(btrim(email)) AS normalized_email, count(*)
+FROM users
+GROUP BY lower(btrim(email))
+HAVING count(*) > 1;
+
+SELECT id, email, oauth_provider, oauth_id
+FROM users
+WHERE btrim(email) = ''
+   OR (oauth_provider IS NULL) <> (oauth_id IS NULL)
+   OR (oauth_provider IS NOT NULL AND
+       (btrim(oauth_provider) = '' OR btrim(oauth_id) = ''));
+
+SELECT oauth_provider, oauth_id, count(*)
+FROM users
+WHERE oauth_provider IS NOT NULL
+GROUP BY oauth_provider, oauth_id
+HAVING count(*) > 1;
+```
+
+Store the first result as a restricted approved-account/method roster; never
+export the hashes themselves.
+
+Use this cutover order:
+
+1. Stop public traffic and stop the API plus the generation, delivery, and sync
+   workers. After all processes are quiescent, take a tested, encrypted backup;
+   restrict and expire access because it contains PII, legacy password hashes,
+   and plaintext legacy reset secrets.
+2. Set `APP_ENV=production`. Configure independent 32-byte-or-longer JWT/CSRF secrets, exact HTTPS
+   frontend/API callback origins on one hostname, `AUTH_COOKIE_SECURE=true`, and
+   Google OAuth and recovery SMTP credentials. Route `/api` to FastAPI on that
+   hostname; the SameSite=Lax cookies intentionally do not support a cross-site
+   SPA/API split. Only exact `APP_ENV=development` permits HTTP cookies.
+3. Apply `python -m app.db.bootstrap`, then deploy the matching API, frontend,
+   and worker code, but do not start any worker yet. The migration normalizes
+   emails, deletes legacy password hashes and reset tokens, and marks every
+   pre-existing user inactive; it deliberately preserves no old password access.
+4. Use `python -m app.auth.admin list`. For an existing password account, run
+   `set-password` and `enable`; for an approved Google-only account, run `enable`;
+   use `create` for a new password account, or `create --google-only` for a new
+   Google account. Distribute initial passwords only through an approved secret
+   channel and have users replace them through password recovery. Restrict CLI
+   execution to a privileged job/shell, retain operator/change-ticket audit logs,
+   and use a separate admin database role from the web runtime where feasible.
+5. Smoke-test `/health` anonymously; verify an anonymous business request gets
+   the generic 401; verify login sets HttpOnly/SameSite/Secure cookies; verify a
+   mutation without `X-CSRF-Token` gets 403; then test password and Google login
+   with approved and unapproved accounts. Confirm `/docs`, `/openapi.json`, and
+   `/api/agent/*` are absent. Send a real reset to a controlled test mailbox and
+   alert on the safe reset-delivery failure log.
+6. Before restoring public traffic, configure reverse-proxy/WAF rate limits.
+   A minimum starting policy is 5 login attempts per 15 minutes per source IP,
+   3 forgot-password attempts per 15 minutes per source IP, 5 reset attempts per
+   15 minutes per source IP, and 30 Google start/callback requests per 5 minutes
+   per source IP. Also enforce per-normalized-account/email limits using a keyed
+   non-reversible identifier, plus a global circuit breaker; if the edge cannot
+   safely key JSON fields, record that residual risk and alert on aggregate abuse.
+   Never log passwords, tokens, raw account identifiers, or contact payloads.
+   This repository does not implement an application-level limiter. Restrict the
+   FastAPI origin/security group so only the trusted proxy can reach it, trust
+   forwarded client IPs only from that proxy, and prove a direct-origin request
+   is denied. Serve all SPA entry HTML with `Cache-Control: no-store`, purge the
+   CDN/browser HTML cache, and verify an old open tab reloads the new bundle.
+   Reset secrets are carried in the URL fragment, which is not sent to HTTP
+   servers, and the frontend removes the fragment before paint. Review queued
+   deliveries before deliberately restarting the delivery worker, then restore
+   the other workers and traffic.
+
+Prefer roll-forward fixes. Do not use the Alembic downgrade as a production
+rollback: deleted password hashes/reset secrets and account decisions cannot be
+reconstructed. The prior API leaves most business routes unauthenticated, so a
+rollback is containment/outage mode and must not restore public traffic. If it is
+unavoidable, stop traffic and all four backend processes, preserve the current
+database for investigation, restore the pre-cutover backup, immediately run
+`DELETE FROM password_reset_tokens;`, and rotate both JWT and CSRF secrets. Run
+the prior API only on a private network or behind an independently verified auth
+gateway while preparing a roll-forward. Before any worker restarts, reconcile
+every provider, sync, and delivery outcome created after the backup; otherwise
+restored queue rows can repeat calls or SMTP delivery.
+
 ## Known gaps and safety
 
-- The real-send endpoint enforces the browser JWT, but the remaining lead,
-  email-review, document, and chat routes do not. The API must not be exposed
-  publicly.
+- Authentication provides one shared workspace: every active approved user can
+  access the same leads, emails, documents, agent runs, and chat sessions.
+  Tenant isolation and role-based permissions are not implemented.
+- Login, reset, and OAuth rate limiting is an external reverse-proxy/WAF
+  requirement. Do not expose the app publicly until that control is configured;
+  there is no in-process rate limiter in this repository, and the API origin must
+  not be directly reachable around the proxy.
 - Manual/scheduled lead sync and CSV upload persist contact data and
   automatically queue a draft for every newly inserted opportunity. Both
   generation/sync workers, document operations, and chat can call billable or
@@ -676,4 +856,6 @@ python -m alembic check
   location correction therefore produces a new lead identity; reconciliation
   of renamed opportunities is not automated.
 - The Alembic baseline is greenfield; legacy import/backfill is out of scope.
-- Production database roles and credential management are not implemented.
+- Separate production web/admin database roles and an application audit-event
+  store are not implemented; restrict CLI execution and retain privileged-job
+  audit logs externally.

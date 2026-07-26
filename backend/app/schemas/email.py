@@ -46,7 +46,6 @@ class EmailRead(BaseModel):
 
 class EmailStatusUpdate(BaseModel):
     status: EmailStatus
-    actor: str | None = None
 
 
 class EmailEdit(BaseModel):

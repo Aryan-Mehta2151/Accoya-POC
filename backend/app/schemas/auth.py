@@ -1,53 +1,62 @@
-"""Pydantic schemas for authentication requests and responses."""
+"""Pydantic schemas for browser authentication."""
 
-from pydantic import BaseModel, EmailStr
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+from app.services.password_service import validate_password
 
 
 class UserResponse(BaseModel):
-    """User details response."""
+    """Safe user details returned to the browser."""
+
+    model_config = ConfigDict(from_attributes=True)
 
     id: str
     email: str
     name: str | None
-
-
-class SignupRequest(BaseModel):
-    """Email/password signup request."""
-
-    email: EmailStr
-    password: str
-    name: str | None = None
+    session_expires_at: datetime
 
 
 class LoginRequest(BaseModel):
     """Email/password login request."""
 
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class ForgotPasswordRequest(BaseModel):
-    """Forgot password request."""
+    """Forgot-password request."""
 
     email: EmailStr
 
 
 class ResetPasswordRequest(BaseModel):
-    """Reset password request."""
+    """One-time password reset request."""
 
-    token: str
+    token: str = Field(min_length=32, max_length=512)
     password: str
+
+    @field_validator("password")
+    @classmethod
+    def password_meets_policy(cls, value: str) -> str:
+        return validate_password(value)
 
 
 class LoginResponse(BaseModel):
-    """Login/signup response."""
+    """Cookie-session login response; it deliberately contains no JWT."""
 
-    access_token: str
-    token_type: str
     user: UserResponse
+    csrf_token: str
 
 
-class GoogleOAuthCallbackRequest(BaseModel):
-    """Google OAuth callback request from frontend."""
+class CsrfResponse(BaseModel):
+    """CSRF header material derived from an HttpOnly seed cookie."""
 
-    code: str
+    csrf_token: str
+
+
+class MessageResponse(BaseModel):
+    """Generic authentication operation result."""
+
+    message: str

@@ -45,6 +45,7 @@ from app.db.models import (
     EmailStatus,
     EmailStatusEvent,
     Lead,
+    User,
 )
 from app.schemas.email import EmailStatusUpdate
 from app.services import (
@@ -141,10 +142,18 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
     def setUp(self) -> None:
         self._clean_agent_rows()
         self.agent = FakeAgent()
+        self.current_user = User(
+            id=str(uuid.uuid4()),
+            email="postgres-reviewer@example.com",
+            is_active=True,
+        )
         app = FastAPI()
         app.include_router(agent_runs.router, prefix="/api")
         app.include_router(emails.router, prefix="/api")
         app.dependency_overrides[get_db] = self._get_db
+        app.dependency_overrides[emails.get_current_user] = (
+            lambda: self.current_user
+        )
         app.dependency_overrides[
             email_generator.get_accoya_email_agent
         ] = lambda: self.agent
@@ -283,11 +292,12 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
             ],
             ["reseller", "client", "schedule_date"],
         )
+        result_count_check = sync_checks[
+            "ck_earlybid_sync_runs_result_count_bounds"
+        ]["sqltext"]
         self.assertIn(
             "created_count + updated_count <= total_count",
-            sync_checks["ck_earlybid_sync_runs_result_count_bounds"][
-                "sqltext"
-            ],
+            result_count_check.replace("(", "").replace(")", ""),
         )
         self.assertIn(
             "status = 'succeeded'",
@@ -581,6 +591,13 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
                 claim=third_claim,
                 agent=self.agent,
             )
+        with self.session_factory() as db:
+            current_email = email_generation_service.current_email_for_lead(
+                db,
+                lead_id,
+            )
+            self.assertIsNotNone(current_email)
+            current_email_id = current_email.id
 
         first_page = self.client.get(
             "/api/agent-runs",
@@ -598,23 +615,27 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
         self.assertEqual(len(second_page.json()["items"]), 1)
 
         edited = self.client.patch(
-            f"/api/emails/{email_id}",
-            json={"subject": "Reviewed subject", "body": "Reviewed body"},
+            f"/api/emails/{current_email_id}",
+            json={
+                "recipient_email": "reviewer@example.com",
+                "subject": "Reviewed subject",
+                "body": "Reviewed body",
+            },
         )
         self.assertEqual(edited.status_code, 200)
         approved = self.client.post(
-            f"/api/emails/{email_id}/status",
-            json={"status": "approved", "actor": "postgres-reviewer"},
+            f"/api/emails/{current_email_id}/status",
+            json={"status": "approved"},
         )
         self.assertEqual(approved.status_code, 200)
 
         with self.session_factory() as db:
             original = db.get(AgentRun, first_run_id)
-            email = db.get(Email, email_id)
+            email = db.get(Email, current_email_id)
             events = list(
                 db.scalars(
                     select(EmailStatusEvent).where(
-                        EmailStatusEvent.email_id == email_id
+                        EmailStatusEvent.email_id == current_email_id
                     )
                 ).all()
             )
@@ -624,7 +645,7 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
             self.assertEqual(len(events), 2)
             transition = next(event for event in events if event.previous_status)
             self.assertEqual(transition.new_status, EmailStatus.approved)
-            self.assertEqual(transition.actor, "postgres-reviewer")
+            self.assertEqual(transition.actor, str(self.current_user.id))
 
 
     def test_claim_skips_a_queue_row_locked_by_another_worker(self):
@@ -769,8 +790,8 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
                         email_id,
                         EmailStatusUpdate(
                             status=EmailStatus.rejected,
-                            actor="competing-reviewer",
                         ),
+                        self.current_user,
                         competing_db,
                     )
                     competing_result["status"] = updated.status
@@ -860,7 +881,7 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
                     EmailStatus.pending_review,
                     EmailStatus.approved,
                 ),
-                "competing-reviewer": (
+                str(self.current_user.id): (
                     EmailStatus.approved,
                     EmailStatus.rejected,
                 ),

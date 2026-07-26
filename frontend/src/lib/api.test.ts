@@ -1,12 +1,24 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
-import { api, ApiError } from './api';
+import {
+  api,
+  ApiError,
+  authApi,
+  clearApiAuthState,
+  subscribeToUnauthorized,
+} from './api';
 
 const base = 'http://localhost:8000/api';
 const server = setupServer();
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+beforeEach(() => {
+  clearApiAuthState();
+  server.use(
+    http.get(`${base}/auth/csrf`, () => HttpResponse.json({ csrf_token: 'csrf-token' })),
+  );
+});
 afterEach(() => {
   server.resetHandlers();
   vi.unstubAllGlobals();
@@ -106,15 +118,16 @@ describe('API client', () => {
     });
   });
 
-  it('sends the stored bearer token and idempotent delivery payload', async () => {
+  it('sends cookies, CSRF, and the unchanged idempotent delivery payload', async () => {
     let capturedAuthorization: string | null = null;
+    let capturedCsrf: string | null = null;
+    let capturedCredentials: RequestCredentials | null = null;
     let capturedBody: unknown;
-    vi.stubGlobal('window', {
-      localStorage: { getItem: (key: string) => key === 'access_token' ? 'signed-jwt' : null },
-    });
     server.use(
       http.post(`${base}/emails/email-1/send`, async ({ request }) => {
         capturedAuthorization = request.headers.get('Authorization');
+        capturedCsrf = request.headers.get('X-CSRF-Token');
+        capturedCredentials = request.credentials;
         capturedBody = await request.json();
         return HttpResponse.json({
           id: 'delivery-1',
@@ -147,12 +160,202 @@ describe('API client', () => {
       acknowledge_duplicate_risk: false,
     });
 
-    expect(capturedAuthorization).toBe('Bearer signed-jwt');
+    expect(capturedAuthorization).toBeNull();
+    expect(capturedCsrf).toBe('csrf-token');
+    expect(capturedCredentials).toBe('include');
     expect(capturedBody).toEqual({
       idempotency_key: '00000000-0000-4000-8000-000000000002',
       expected_content_hash: 'b'.repeat(64),
       acknowledge_duplicate_risk: false,
     });
+  });
+
+  it('does not send CSRF on reads and notifies listeners on business-route 401s', async () => {
+    let capturedCsrf: string | null = null;
+    let capturedCredentials: RequestCredentials | null = null;
+    const onUnauthorized = vi.fn();
+    const unsubscribe = subscribeToUnauthorized(onUnauthorized);
+    server.use(
+      http.get(`${base}/leads`, ({ request }) => {
+        capturedCsrf = request.headers.get('X-CSRF-Token');
+        capturedCredentials = request.credentials;
+        return HttpResponse.json(
+          { detail: { code: 'authentication_required', message: 'Sign in is required.' } },
+          { status: 401 },
+        );
+      }),
+    );
+
+    await expect(api.listLeads()).rejects.toMatchObject({
+      status: 401,
+      code: 'authentication_required',
+    });
+    expect(capturedCsrf).toBeNull();
+    expect(capturedCredentials).toBe('include');
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it('discards a business success that completes after the session changes', async () => {
+    let releaseResponse!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const responseGate = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+    server.use(
+      http.get(`${base}/leads`, async () => {
+        markStarted();
+        await responseGate;
+        return HttpResponse.json([]);
+      }),
+    );
+
+    const staleRequest = api.listLeads();
+    await started;
+    clearApiAuthState();
+    releaseResponse();
+
+    await expect(staleRequest).rejects.toMatchObject({
+      code: 'auth_state_changed',
+    });
+  });
+
+  it('does not let a stale business 401 clear a newer session', async () => {
+    let releaseResponse!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const responseGate = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+    const onUnauthorized = vi.fn();
+    const unsubscribe = subscribeToUnauthorized(onUnauthorized);
+    server.use(
+      http.get(`${base}/leads`, async () => {
+        markStarted();
+        await responseGate;
+        return HttpResponse.json(
+          { detail: { code: 'authentication_required', message: 'Sign in is required.' } },
+          { status: 401 },
+        );
+      }),
+    );
+
+    const staleRequest = api.listLeads();
+    await started;
+    clearApiAuthState();
+    releaseResponse();
+
+    await expect(staleRequest).rejects.toMatchObject({
+      code: 'auth_state_changed',
+    });
+    expect(onUnauthorized).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it('does not replay a CSRF failure but refreshes for the next explicit action', async () => {
+    let attempts = 0;
+    let csrfLoads = 0;
+    const csrfHeaders: Array<string | null> = [];
+    server.use(
+      http.get(`${base}/auth/csrf`, () => {
+        csrfLoads += 1;
+        return HttpResponse.json({
+          csrf_token: csrfLoads === 1 ? 'csrf-rejected' : 'csrf-refreshed',
+        });
+      }),
+      http.post(`${base}/leads/sync`, ({ request }) => {
+        attempts += 1;
+        csrfHeaders.push(request.headers.get('X-CSRF-Token'));
+        if (attempts === 1) {
+          return HttpResponse.json(
+            { detail: { code: 'csrf_failed', message: 'Security validation failed.' } },
+            { status: 403 },
+          );
+        }
+        return HttpResponse.json({ created: 0, updated: 0, total: 0 });
+      }),
+    );
+
+    await expect(api.syncLeads()).rejects.toMatchObject({ status: 403, code: 'csrf_failed' });
+    expect(attempts).toBe(1);
+    expect(csrfLoads).toBe(1);
+
+    await expect(api.syncLeads()).resolves.toMatchObject({ total: 0 });
+    expect(attempts).toBe(2);
+    expect(csrfLoads).toBe(2);
+    expect(csrfHeaders).toEqual(['csrf-rejected', 'csrf-refreshed']);
+  });
+
+  it('uses the CSRF token rotated by a successful cookie login', async () => {
+    let loginCsrf: string | null = null;
+    let mutationCsrf: string | null = null;
+    server.use(
+      http.post(`${base}/auth/login`, ({ request }) => {
+        loginCsrf = request.headers.get('X-CSRF-Token');
+        return HttpResponse.json({
+          user: {
+            id: 'user-1',
+            email: 'approved@example.com',
+            name: null,
+            session_expires_at: '2099-01-01T00:00:00Z',
+          },
+          csrf_token: 'csrf-after-login',
+        });
+      }),
+      http.post(`${base}/leads/sync`, ({ request }) => {
+        mutationCsrf = request.headers.get('X-CSRF-Token');
+        return HttpResponse.json({ created: 0, updated: 0, total: 0 });
+      }),
+    );
+
+    await authApi.login('approved@example.com', 'correct horse battery staple');
+    await api.syncLeads();
+
+    expect(loginCsrf).toBe('csrf-token');
+    expect(mutationCsrf).toBe('csrf-after-login');
+  });
+
+  it('cannot restore a CSRF token from a request invalidated by logout', async () => {
+    let csrfCalls = 0;
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let mutationCsrf: string | null = null;
+    server.use(
+      http.get(`${base}/auth/csrf`, async () => {
+        csrfCalls += 1;
+        if (csrfCalls === 1) {
+          markFirstStarted();
+          await firstGate;
+          return HttpResponse.json({ csrf_token: 'csrf-stale' });
+        }
+        return HttpResponse.json({ csrf_token: 'csrf-fresh' });
+      }),
+      http.post(`${base}/leads/sync`, ({ request }) => {
+        mutationCsrf = request.headers.get('X-CSRF-Token');
+        return HttpResponse.json({ created: 0, updated: 0, total: 0 });
+      }),
+    );
+
+    const staleLoad = authApi.prepareCsrf(true);
+    await firstStarted;
+    clearApiAuthState();
+    releaseFirst();
+
+    await expect(staleLoad).rejects.toMatchObject({ code: 'auth_state_changed' });
+    await api.syncLeads();
+    expect(csrfCalls).toBe(2);
+    expect(mutationCsrf).toBe('csrf-fresh');
   });
 
   it('turns FastAPI validation arrays into readable messages', async () => {

@@ -1,15 +1,16 @@
-import { useState } from 'react';
+import { useLayoutEffect, useState } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import styles from './auth.module.css';
 
 export function ResetPasswordPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { resetPassword } = useAuth();
-  const [searchParams] = useSearchParams();
-  
-  const token = searchParams.get('token');
+  const [token] = useState(() => (
+    new URLSearchParams(location.hash.replace(/^#/, '')).get('token')
+  ));
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -17,6 +18,18 @@ export function ResetPasswordPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  useLayoutEffect(() => {
+    if (!token || !location.hash) return;
+    // Keep the one-time secret only in component memory. Removing it before
+    // paint prevents later same-origin requests and copied history entries from
+    // retaining the reset URL.
+    window.history.replaceState(
+      window.history.state,
+      '',
+      location.pathname,
+    );
+  }, [location.hash, location.pathname, token]);
 
   if (!token) {
     return (
@@ -46,8 +59,13 @@ export function ResetPasswordPage() {
       return;
     }
 
-    if (password.length < 8) {
-      setError('Password must be at least 8 characters');
+    if (password.length < 12) {
+      setError('Password must be at least 12 characters');
+      return;
+    }
+
+    if (new TextEncoder().encode(password).length > 72) {
+      setError('Password must be no more than 72 UTF-8 bytes');
       return;
     }
 
@@ -102,7 +120,8 @@ export function ResetPasswordPage() {
                 placeholder='Create a secure password'
                 required
                 autoFocus
-                minLength={8}
+                minLength={12}
+                maxLength={72}
               />
               <button
                 type='button'
@@ -115,7 +134,7 @@ export function ResetPasswordPage() {
               </button>
             </div>
             <span className={styles.fieldHint}>
-              At least 8 characters
+              12 characters minimum; 72 UTF-8 bytes maximum
             </span>
           </div>
 
@@ -129,7 +148,8 @@ export function ResetPasswordPage() {
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder='Re-enter your new password'
                 required
-                minLength={8}
+                minLength={12}
+                maxLength={72}
               />
               <button
                 type='button'

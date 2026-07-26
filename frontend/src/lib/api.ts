@@ -13,10 +13,31 @@ import type {
   SyncResult,
 } from '../types';
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api').replace(
+const DEFAULT_API_BASE = import.meta.env.DEV
+  ? typeof window === 'undefined'
+    ? 'http://localhost:8000/api'
+    : `${window.location.protocol}//${window.location.hostname}:8000/api`
+  : '/api';
+
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE).replace(
   /\/$/,
   '',
 );
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  name: string | null;
+  session_expires_at: string;
+}
+
+interface CsrfResponse {
+  csrf_token: string;
+}
+
+interface LoginResponse extends CsrfResponse {
+  user: AuthUser;
+}
 
 type ErrorPayload = {
   code?: unknown;
@@ -24,6 +45,16 @@ type ErrorPayload = {
   warnings?: unknown;
   detail?: unknown;
 };
+
+type UnauthorizedListener = () => void;
+
+const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const unauthorizedListeners = new Set<UnauthorizedListener>();
+let csrfToken: string | null = null;
+let csrfRequest: Promise<string> | null = null;
+let csrfRequestEpoch: number | null = null;
+let authStateEpoch = 0;
+let sessionGeneration = 0;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -82,10 +113,41 @@ async function parseBody(response: Response): Promise<unknown> {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  let response: Response;
+function apiErrorFromResponse(response: Response, body: unknown): ApiError {
+  const payload = body && typeof body === 'object' ? (body as ErrorPayload) : {};
+  const nestedDetail =
+    payload.detail && typeof payload.detail === 'object'
+      ? (payload.detail as ErrorPayload)
+      : {};
+  const message =
+    (typeof payload.message === 'string' && payload.message) ||
+    (typeof nestedDetail.message === 'string' && nestedDetail.message) ||
+    readableDetail(payload.detail) ||
+    readableDetail(body) ||
+    `The request failed with status ${response.status}.`;
+  const warnings = Array.isArray(payload.warnings)
+    ? payload.warnings.map(String)
+    : [];
+
+  return new ApiError({
+    status: response.status,
+    message,
+    code:
+      (typeof payload.code === 'string' && payload.code) ||
+      (typeof nestedDetail.code === 'string' && nestedDetail.code) ||
+      undefined,
+    warnings,
+    detail: payload.detail ?? body,
+  });
+}
+
+async function fetchApi(path: string, init?: RequestInit): Promise<Response> {
   try {
-    response = await fetch(`${API_BASE}${path}`, init);
+    return await fetch(`${API_BASE}${path}`, {
+      ...init,
+      cache: 'no-store',
+      credentials: 'include',
+    });
   } catch (error) {
     throw new ApiError({
       status: 0,
@@ -93,29 +155,156 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       detail: error,
     });
   }
+}
 
+function authStateChangedError(): ApiError {
+  return new ApiError({
+    status: 0,
+    code: 'auth_state_changed',
+    message: 'The sign-in state changed while the request was in progress. Try again.',
+  });
+}
+
+async function loadCsrfToken(force = false): Promise<string> {
+  if (force) {
+    authStateEpoch += 1;
+    csrfToken = null;
+  }
+
+  // Never overlap CSRF fetches. An older response can carry a Set-Cookie
+  // header, so merely ignoring its JSON token would still desynchronize the
+  // HttpOnly seed from the in-memory header token.
+  if (csrfRequest) {
+    const pending = csrfRequest;
+    if (!force && csrfRequestEpoch === authStateEpoch) return pending;
+    try {
+      await pending;
+    } catch {
+      // A superseded request is expected to fail its epoch check. Its response
+      // must still settle before a replacement request may start.
+    }
+    return loadCsrfToken(false);
+  }
+  if (!force && csrfToken) return csrfToken;
+
+  const requestEpoch = authStateEpoch;
+  const pending = (async () => {
+    const response = await fetchApi('/auth/csrf');
+    const body = await parseBody(response);
+    if (requestEpoch !== authStateEpoch) throw authStateChangedError();
+    if (!response.ok) throw apiErrorFromResponse(response, body);
+    const token =
+      body && typeof body === 'object' && 'csrf_token' in body
+        ? (body as { csrf_token: unknown }).csrf_token
+        : null;
+    if (typeof token !== 'string' || !token) {
+      throw new ApiError({
+        status: 500,
+        message: 'The service returned an invalid security token.',
+        detail: body,
+      });
+    }
+    csrfToken = token;
+    return token;
+  })();
+  csrfRequest = pending;
+  csrfRequestEpoch = requestEpoch;
+
+  try {
+    return await pending;
+  } finally {
+    if (csrfRequest === pending) {
+      csrfRequest = null;
+      csrfRequestEpoch = null;
+    }
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const sessionBound = !path.startsWith('/auth/');
+  const requestGeneration = sessionGeneration;
+  const method = (init?.method ?? 'GET').toUpperCase();
+  const headers = new Headers(init?.headers);
+  if (unsafeMethods.has(method)) {
+    headers.set('X-CSRF-Token', await loadCsrfToken());
+  }
+  if (sessionBound && requestGeneration !== sessionGeneration) {
+    throw authStateChangedError();
+  }
+
+  const response = await fetchApi(path, { ...init, method, headers });
   const body = await parseBody(response);
+  if (sessionBound && requestGeneration !== sessionGeneration) {
+    throw authStateChangedError();
+  }
   if (!response.ok) {
-    const payload = body && typeof body === 'object' ? (body as ErrorPayload) : {};
-    const message =
-      (typeof payload.message === 'string' && payload.message) ||
-      readableDetail(payload.detail) ||
-      readableDetail(body) ||
-      `The request failed with status ${response.status}.`;
-    const warnings = Array.isArray(payload.warnings)
-      ? payload.warnings.map(String)
-      : [];
-    throw new ApiError({
-      status: response.status,
-      message,
-      code: typeof payload.code === 'string' ? payload.code : undefined,
-      warnings,
-      detail: payload.detail ?? body,
-    });
+    const error = apiErrorFromResponse(response, body);
+    if (response.status === 401 && !path.startsWith('/auth/')) {
+      unauthorizedListeners.forEach((listener) => listener());
+    }
+    if (response.status === 403 && error.code === 'csrf_failed') {
+      // Do not replay the rejected mutation. Forget only the bad CSRF token so
+      // the user's next explicit action can obtain current cookie-bound data.
+      authStateEpoch += 1;
+      csrfToken = null;
+    }
+    throw error;
   }
 
   return body as T;
 }
+
+export function subscribeToUnauthorized(listener: UnauthorizedListener): () => void {
+  unauthorizedListeners.add(listener);
+  return () => unauthorizedListeners.delete(listener);
+}
+
+export function clearApiAuthState(): void {
+  sessionGeneration += 1;
+  authStateEpoch += 1;
+  csrfToken = null;
+}
+
+export const authApi = {
+  prepareCsrf: (force = false) => loadCsrfToken(force),
+  getCurrentUser: () => request<AuthUser>('/auth/me'),
+  login: async (email: string, password: string) => {
+    const response = await request<LoginResponse>('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    // Login rotates both cookies. Invalidate every CSRF fetch that began under
+    // the previous anonymous cookie pair before publishing the new token.
+    sessionGeneration += 1;
+    authStateEpoch += 1;
+    csrfToken = response.csrf_token;
+    return response.user;
+  },
+  logout: async () => {
+    try {
+      await request<unknown>('/auth/logout', { method: 'POST' });
+    } catch (error) {
+      // An expired/revoked cookie already means logout succeeded from the
+      // browser's perspective. Network and server failures remain retryable.
+      if (!(error instanceof ApiError) || error.status !== 401) throw error;
+    }
+    clearApiAuthState();
+  },
+  forgotPassword: (email: string) =>
+    request<{ message: string }>('/auth/forgot-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    }),
+  resetPassword: (token: string, password: string) =>
+    request<{ message: string }>('/auth/reset-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, password }),
+    }),
+  googleStartUrl: () => `${API_BASE}/auth/google/start`,
+};
 
 function toUiChatRole(role: unknown): ChatMessage['role'] {
   if (role === 'human' || role === 'user') return 'user';
@@ -178,19 +367,12 @@ export const api = {
       expected_content_hash: string;
       acknowledge_duplicate_risk: boolean;
     },
-  ) => {
-    const token = typeof window === 'undefined'
-      ? null
-      : window.localStorage.getItem('access_token');
-    return request<EmailDeliveryJob>(`/emails/${encodeURIComponent(emailId)}/send`, {
+  ) =>
+    request<EmailDeliveryJob>(`/emails/${encodeURIComponent(emailId)}/send`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-    });
-  },
+    }),
 
   listDocuments: () => request<StrategyDocument[]>('/documents'),
   uploadDocument: (file: File) => {

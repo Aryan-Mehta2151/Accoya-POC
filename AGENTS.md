@@ -7,10 +7,11 @@ This file applies to the entire repository. There are currently no nested
 source of truth when they disagree with a README; known documentation drift is
 listed below.
 
-This is a largely unauthenticated proof of concept, not a production-ready
-service. The real-send endpoint requires the existing JWT, but other business
-routes remain unprotected. It handles contact data and can call live, billable,
-or mutating external services.
+This is an authenticated shared-workspace proof of concept, not a
+production-ready multi-tenant service. Every business route requires an active,
+administrator-provisioned account, but every approved user can access the same
+data and actions. It handles contact data and can call live, billable, or
+mutating external services.
 
 ## What this project does
 
@@ -96,10 +97,16 @@ python -m app.workers.earlybid_sync
 
 The default server is `http://localhost:8000`, OpenAPI is at `/docs`, health is
 at `/health`, and application routes use `API_PREFIX` (default `/api`). Startup
-checks connectivity and requires the configured database to be at the current
-Alembic head; it never creates or upgrades tables. `python -m app.db.bootstrap`
+validates web-auth configuration, checks connectivity, and requires the
+configured database to be at the current Alembic head; it never creates or
+upgrades tables. `python -m app.db.bootstrap`
 creates the configured PostgreSQL database when absent and idempotently applies
 all migrations. Run it after changing `DATABASE_URL` or pulling a migration.
+After the auth migration, create or enable approved accounts with
+`python -m app.auth.admin`; passwords are entered through a hidden prompt and
+there is no public signup or admin HTTP API. Migration invalidates every legacy
+password hash; password accounts require an explicit `set-password` plus
+`enable`; `create --google-only` provisions a new approved Google-only account.
 Run one instance of each worker by default for this POC. PostgreSQL claims make
 multiple instances safe, and queued work survives process restarts. The
 generation worker exits when model configuration is incomplete, the delivery
@@ -117,10 +124,11 @@ npm ci
 npm run dev
 ```
 
-Vite serves on `http://localhost:5173` by default. The browser API base defaults
-to `http://localhost:8000/api`. Override it with `VITE_API_BASE_URL`, including
-the API prefix. The backend CORS allowlist only contains localhost and
-127.0.0.1 on port 5173.
+Vite serves on `http://localhost:5173` by default. In development the browser
+API base defaults to port 8000 on the page hostname; production defaults to the
+same-origin `/api`. Override it with `VITE_API_BASE_URL`, including the API
+prefix. Configure the matching explicit origin through `CORS_ALLOWED_ORIGINS`;
+credentialed CORS must never use a wildcard or a different site.
 
 ## Configuration
 
@@ -129,7 +137,7 @@ any other tracked file.
 
 | Area | Variables | Important behavior |
 | --- | --- | --- |
-| App | `APP_ENV`, `API_PREFIX` | `/api/agent/*` is registered only when `APP_ENV=development`. `/health` is not under the prefix. |
+| App | `APP_ENV`, `API_PREFIX`, `CORS_ALLOWED_ORIGINS` | `APP_ENV` defaults to a fail-closed unset value and must be explicit. `/api/agent/*` is registered only when `APP_ENV=development` and remains authenticated. `/health` is public and not under the prefix. Docs/OpenAPI are development-only. |
 | Database | `DATABASE_URL` | Example/default targets `accoya_agent` on local port 5433. Runtime has no SQLite fallback; bootstrap creates the database and migrates it. |
 | AWS | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Blank keys let boto3 use its normal credential chain/IAM role. Code defaults to `us-east-1`, while `.env.example` says `us-east-2`. |
 | S3 | `S3_BUCKET_STRATEGY_DOCS` | Required for document list/upload/delete. |
@@ -138,7 +146,8 @@ any other tracked file.
 | Generation worker | `EMAIL_GENERATION_WORKER_POLL_SECONDS`, `EMAIL_GENERATION_HEARTBEAT_SECONDS`, `EMAIL_GENERATION_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. Keep the stale threshold safely above the heartbeat interval. |
 | Delivery worker | `EMAIL_DELIVERY_WORKER_POLL_SECONDS`, `EMAIL_DELIVERY_HEARTBEAT_SECONDS`, `EMAIL_DELIVERY_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. Keep stale safely above heartbeat. |
 | SMTP delivery | `SMTP_HOST`, `SMTP_PORT`, `SMTP_EMAIL`, `SMTP_PASSWORD`, `SMTP_TIMEOUT_SECONDS` | Required by the delivery worker; timeout defaults to 30 seconds. The worker uses authenticated STARTTLS and stable Message-IDs; a timeout may produce an unknown outcome. |
-| Authentication | `JWT_SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES` | The real-send endpoint requires a valid Bearer JWT and a nonblank signing secret; other business routes remain unprotected. |
+| Authentication | `JWT_SECRET_KEY`, `CSRF_SECRET_KEY`, `JWT_ISSUER`, `JWT_AUDIENCE`, `AUTH_COOKIE_SECURE`, `FRONTEND_URL` | Every business route requires an active user and the eight-hour JWT HttpOnly cookie; unsafe methods also require the cookie-bound CSRF header. Production startup requires explicit `APP_ENV=production`, strong secrets, canonical HTTPS URLs/CORS, secure cookies, and one frontend/API hostname for SameSite=Lax. |
+| Google OAuth | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` | Required outside development. State and PKCE protect the flow; Google never auto-provisions a user. |
 | EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Sync uses Bearer auth; reseller/client also scope derived natural identities. |
 | Daily sync | `LEAD_AUTO_SYNC_TIMEZONE`, `LEAD_AUTO_SYNC_POLL_SECONDS`, `LEAD_AUTO_SYNC_HEARTBEAT_SECONDS`, `LEAD_AUTO_SYNC_STALE_SECONDS` | Defaults to `America/Los_Angeles`, 30, 15, and 300 seconds. Use an IANA timezone and keep stale greater than heartbeat. |
 | Frontend | `VITE_API_BASE_URL` | Optional; include `/api` unless `API_PREFIX` was changed. |
@@ -192,7 +201,8 @@ environment values.
   `AgentRun`, calls providers outside database transactions, heartbeats, and
   atomically finalizes the job/run/email/status event. Failures and stale jobs
   are terminal and are never automatically replayed.
-- Email-delivery jobs: JWT-authenticated `POST /api/emails/{email_id}/send`
+- Email-delivery jobs: cookie-authenticated and CSRF-protected `POST
+  /api/emails/{email_id}/send`
   idempotently queues a snapshotted sender, recipient, subject, and body and
   returns 202. It requires the current approved email, valid saved content, and
   a matching delivery-content hash. At most one queued/running job exists per
@@ -261,9 +271,10 @@ environment values.
   within the four-attempt limit.
 - Use FastAPI dependencies for database sessions and response models for typed
   endpoints. Existing database and external clients are synchronous.
-- Keep the real-send endpoint JWT-protected and validate its expected content
-  hash under the email row lock. Do not infer authentication for the remaining
-  business routes without a separate authorization change.
+- Keep every business router behind the shared cookie-auth dependency and CSRF
+  dependency for unsafe methods. Preserve the real-send content-hash validation
+  under the email row lock. Do not confuse shared authentication with tenant or
+  object-level authorization.
 - Translate expected integration failures into useful HTTP errors without
   exposing credentials. The existing convention generally uses 502 for an
   upstream failure and 404 for a missing local record.
@@ -290,17 +301,18 @@ environment values.
 - Tab switches unmount pages, so component-local chat sessions, previews, and
   other page state reset. React StrictMode can also repeat initial GET effects
   during development.
-- Vite has no development proxy. The API helper expects every successful
-  response, including deletes, to contain JSON and has no auth, retry, or
-  cancellation layer.
+- Vite has no development proxy. The API helper sends credentials on every
+  request, obtains the CSRF token for unsafe methods, and expects every
+  successful response, including deletes, to contain JSON.
 - There is no formatter, and quote/semicolon style varies. Follow the adjacent
   file rather than performing unrelated formatting churn.
 - Keep `types.ts` and `api.ts` synchronized with backend response models and
   paths. Preserve snake_case JSON field names unless both sides intentionally
   change.
-- Send the stored Bearer JWT only for real delivery, retain one idempotency key
-  across a network-error retry, and poll while delivery is queued/running.
-  Never automatically acknowledge or retry an unknown delivery outcome.
+- Never expose the JWT to JavaScript storage. Use the shared AuthProvider,
+  credentialed cookie requests, and in-memory CSRF token. Retain one delivery
+  idempotency key across a network-error retry and never automatically
+  acknowledge or retry an unknown delivery outcome.
 - Styles are global; reuse existing classes/variables or account for both CSS
   files. No component library or state-management package is installed.
 - Change dependencies through npm and commit `package.json` and
@@ -331,7 +343,7 @@ whose name ends in `_test`:
 ```powershell
 # backend/; never point this at accoya_agent or another non-test database.
 $env:ACCOYA_TEST_DATABASE_URL="postgresql+psycopg2://postgres:YOUR_PASSWORD@localhost:5433/accoya_agent_test"
-python -m unittest tests.test_postgres_agent_database tests.test_postgres_email_delivery -v
+python -m unittest tests.test_postgres_auth_migration tests.test_postgres_agent_database tests.test_postgres_email_delivery -v
 Remove-Item Env:ACCOYA_TEST_DATABASE_URL
 ```
 
@@ -376,8 +388,12 @@ automated verification.
 - `.env`, virtual environments, `node_modules`, build output, logs, local
   SQLite files, and temp files are ignored. Do not commit secrets, real lead
   CSVs, contact data, or captured API payloads.
-- Only the real-send endpoint enforces the existing JWT; the remaining business
-  API has no authorization. Do not expose it publicly in its current form.
+- Authentication gates the shared workspace but does not implement roles,
+  tenant ownership, or per-user isolation. Every active approved user can read
+  and mutate all business data, including operations that queue live work.
+- Authentication rate limiting is not implemented in FastAPI. Production
+  exposure requires reverse-proxy/WAF limits for login, forgot/reset, and Google
+  OAuth endpoints; preserve the cutover and rollback checklist in `README.md`.
 - Treat manual/scheduled lead sync and CSV upload as PostgreSQL/PII writes that
   automatically queue one draft for every new lead. Running the generation or
   sync worker, document upload/delete/list, manual regeneration, and chat can

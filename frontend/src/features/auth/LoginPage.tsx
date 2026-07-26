@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import styles from './auth.module.css';
 
@@ -15,99 +15,92 @@ function GoogleLogo() {
   );
 }
 
+function returnPath(state: unknown): string {
+  if (
+    state &&
+    typeof state === 'object' &&
+    'from' in state &&
+    typeof state.from === 'string' &&
+    state.from.startsWith('/') &&
+    !state.from.startsWith('//')
+  ) {
+    return state.from;
+  }
+  return '/';
+}
+
 export function LoginPage() {
   const navigate = useNavigate();
-  const auth = useAuth();
-  const { login, signup } = auth;
-  
-  const [isSignup, setIsSignup] = useState(false);
+  const location = useLocation();
+  const { login, startGoogleLogin, status } = useAuth();
+  const destination = returnPath(location.state);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [name, setName] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  if (status === 'authenticated') {
+    return <Navigate to={destination} replace />;
+  }
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
     setError('');
     setLoading(true);
-
     try {
-      if (isSignup) {
-        await signup(email, password, name);
-      } else {
-        await login(email, password);
-      }
-      navigate('/');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
+      await login(email, password);
+      navigate(destination, { replace: true });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Sign in failed.');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleGoogleLogin = async () => {
-    // Google OAuth flow
-    const clientId = '634738397052-vj13olo17pvqgjsoklrhqqiun29kcpbc.apps.googleusercontent.com';
-    const redirectUri = 'http://localhost:8000/api/auth/callback/google';
-    const scope = 'openid email profile';
-    
-    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` +
-      `client_id=${clientId}&` +
-      `redirect_uri=${encodeURIComponent(redirectUri)}&` +
-      `response_type=code&` +
-      `scope=${encodeURIComponent(scope)}`;
-    
-    window.location.href = authUrl;
+  const handleGoogleLogin = () => {
+    try {
+      window.sessionStorage.setItem('accoya-auth-return-to', destination);
+    } catch {
+      // The OAuth flow still works when browser storage is unavailable.
+    }
+    startGoogleLogin();
   };
 
   return (
     <div className={styles.container}>
       <div className={styles.card}>
         <div className={styles.header}>
-          <h1>{isSignup ? 'Create Account' : 'Sign In'}</h1>
-          <p>{isSignup ? 'Join Accoya today' : 'Welcome back'}</p>
+          <h1>Sign In</h1>
+          <p>Welcome back</p>
         </div>
 
         {error && <div className={styles.error}>{error}</div>}
 
         <form onSubmit={handleSubmit} className={styles.form}>
-          {isSignup && (
-            <div className={styles.formGroup}>
-              <label htmlFor="name">Full Name</label>
-              <input
-                id="name"
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="John Doe"
-                required={isSignup}
-              />
-            </div>
-          )}
-
           <div className={styles.formGroup}>
-            <label htmlFor="email">Email Address</label>
+            <label htmlFor='email'>Email Address</label>
             <input
-              id="email"
-              type="email"
+              id='email'
+              type='email'
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder='you@example.com'
+              autoComplete='email'
               required
             />
           </div>
 
           <div className={styles.formGroup}>
-            <label htmlFor="password">Password</label>
+            <label htmlFor='password'>Password</label>
             <div className={styles.passwordField}>
               <input
                 id='password'
                 type={showPassword ? 'text' : 'password'}
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder={isSignup ? 'Create a secure password' : 'Enter your password'}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder='Enter your password'
+                autoComplete='current-password'
                 required
               />
               <button
@@ -120,19 +113,13 @@ export function LoginPage() {
                 {showPassword ? <EyeOff aria-hidden='true' /> : <Eye aria-hidden='true' />}
               </button>
             </div>
-            {!isSignup && (
-              <a href="/forgot-password" className={styles.forgotPassword}>
-                Forgot password?
-              </a>
-            )}
+            <a href='/forgot-password' className={styles.forgotPassword}>
+              Forgot password?
+            </a>
           </div>
 
-          <button
-            type="submit"
-            className={styles.submitButton}
-            disabled={loading}
-          >
-            {loading ? 'Loading...' : isSignup ? 'Create Account' : 'Sign In'}
+          <button type='submit' className={styles.submitButton} disabled={loading}>
+            {loading ? 'Signing in...' : 'Sign In'}
           </button>
         </form>
 
@@ -141,7 +128,7 @@ export function LoginPage() {
         </div>
 
         <button
-          type="button"
+          type='button'
           className={styles.googleButton}
           onClick={handleGoogleLogin}
           disabled={loading}
@@ -151,16 +138,7 @@ export function LoginPage() {
         </button>
 
         <div className={styles.toggle}>
-          <p>
-            {isSignup ? 'Already have an account?' : "Don't have an account?"}
-            <button
-              type="button"
-              onClick={() => setIsSignup(!isSignup)}
-              className={styles.toggleButton}
-            >
-              {isSignup ? 'Sign in' : 'Sign up'}
-            </button>
-          </p>
+          <p>Accounts are managed by your Accoya administrator.</p>
         </div>
       </div>
     </div>

@@ -29,6 +29,7 @@ from app.db.models import (
     EmailStatus,
     EmailStatusEvent,
     Lead,
+    User,
 )
 from app.services import agent_run_service, email_generator
 
@@ -93,11 +94,19 @@ class AgentRunTests(unittest.TestCase):
             expire_on_commit=False,
         )
         self.agent = FakeAgent()
+        self.current_user = User(
+            id=str(uuid.uuid4()),
+            email="reviewer@example.com",
+            is_active=True,
+        )
 
         app = FastAPI()
         app.include_router(agent_runs.router, prefix="/api")
         app.include_router(emails.router, prefix="/api")
         app.dependency_overrides[get_db] = self._get_db
+        app.dependency_overrides[emails.get_current_user] = (
+            lambda: self.current_user
+        )
         app.dependency_overrides[
             email_generator.get_accoya_email_agent
         ] = lambda: self.agent
@@ -315,17 +324,17 @@ class AgentRunTests(unittest.TestCase):
         self.assertEqual(edited.status_code, 200)
         approved = self.client.post(
             f"/api/emails/{email_id}/status",
-            json={"status": "approved", "actor": "reviewer"},
+            json={"status": "approved"},
         )
         self.assertEqual(approved.status_code, 200)
         unchanged = self.client.post(
             f"/api/emails/{email_id}/status",
-            json={"status": "approved", "actor": "duplicate reviewer"},
+            json={"status": "approved"},
         )
         self.assertEqual(unchanged.status_code, 200)
         rejected = self.client.post(
             f"/api/emails/{email_id}/status",
-            json={"status": "rejected", "actor": "final reviewer"},
+            json={"status": "rejected"},
         )
         self.assertEqual(rejected.status_code, 200)
         self.assertEqual(rejected.json()["status"], EmailStatus.rejected.value)
@@ -353,12 +362,12 @@ class AgentRunTests(unittest.TestCase):
                 approved_event.previous_status,
                 EmailStatus.pending_review,
             )
-            self.assertEqual(approved_event.actor, "reviewer")
+            self.assertEqual(approved_event.actor, str(self.current_user.id))
             rejected_event = next(
                 event for event in events if event.new_status is EmailStatus.rejected
             )
             self.assertEqual(rejected_event.previous_status, EmailStatus.approved)
-            self.assertEqual(rejected_event.actor, "final reviewer")
+            self.assertEqual(rejected_event.actor, str(self.current_user.id))
 
     def test_email_routes_return_404_for_invalid_identifiers(self):
         cases = ("not-a-uuid", str(uuid.uuid4()))

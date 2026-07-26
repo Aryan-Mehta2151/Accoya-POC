@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 from sqlalchemy import create_engine, text
 
 from app.db import bootstrap, database
-from app.db.models import AgentRun, EarlyBidSyncRun, EmailGenerationJob
+from app.db.models import AgentRun, EarlyBidSyncRun, EmailGenerationJob, User
 
 
 class SchemaValidationTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class SchemaValidationTests(unittest.TestCase):
 
     def test_missing_revision_is_rejected_and_head_is_accepted(self) -> None:
         expected_heads = database.get_expected_schema_heads()
-        self.assertEqual(expected_heads, ("0006_email_delivery_queue",))
+        self.assertEqual(expected_heads, ("0007_web_auth_security",))
 
         with patch.object(database, "engine", self.engine):
             with self.assertRaisesRegex(RuntimeError, "not at the required"):
@@ -68,6 +68,21 @@ class SchemaValidationTests(unittest.TestCase):
         self.assertEqual(
             [column.name for column in pagination_index.columns],
             ["started_at", "id"],
+        )
+
+    def test_user_metadata_enforces_normalized_identity_invariants(self) -> None:
+        checks = {
+            constraint.name: str(constraint.sqltext)
+            for constraint in User.__table__.constraints
+            if constraint.name and hasattr(constraint, "sqltext")
+        }
+        self.assertIn(
+            "email = lower(trim(email))",
+            checks["ck_users_email_normalized"],
+        )
+        self.assertIn(
+            "length(trim(oauth_id)) > 0",
+            checks["ck_users_oauth_identity_complete"],
         )
 
     def test_email_generation_job_metadata_enforces_queue_invariants(self) -> None:

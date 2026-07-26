@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import { useAuth } from '../hooks/useAuth';
 import styles from './AppShell.module.css';
 
@@ -65,10 +66,17 @@ function UserMenu() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
-  const handleLogout = () => {
-    logout();
-    navigate('/login');
+  const handleLogout = async () => {
+    setSigningOut(true);
+    try {
+      await logout();
+      navigate('/login');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Sign out failed. Please try again.');
+      setSigningOut(false);
+    }
   };
 
   return (
@@ -93,11 +101,12 @@ function UserMenu() {
           <button
             type='button'
             className={styles.signOutButton}
-            onClick={handleLogout}
+            onClick={() => void handleLogout()}
+            disabled={signingOut}
             role='menuitem'
           >
             <LogOut aria-hidden='true' />
-            Sign out
+            {signingOut ? 'Signing out...' : 'Sign out'}
           </button>
         </div>
       )}

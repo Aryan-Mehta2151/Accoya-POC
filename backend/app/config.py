@@ -1,8 +1,11 @@
 """Application configuration loaded from environment variables."""
+import json
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated, Any
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
@@ -13,8 +16,14 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=str(_ENV_PATH), extra="ignore")
 
     # App
-    app_env: str = "development"
+    # Fail closed when APP_ENV is omitted. Only the explicit value
+    # "development" relaxes HTTPS/cookie checks and exposes diagnostics.
+    app_env: str = "unset"
     api_prefix: str = "/api"
+    cors_allowed_origins: Annotated[list[str], NoDecode] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
 
     # Database
     database_url: str = (
@@ -70,10 +79,14 @@ class Settings(BaseSettings):
     # Google OAuth
     google_client_id: str = ""
     google_client_secret: str = ""
+    google_redirect_uri: str = "http://localhost:8000/api/auth/callback/google"
 
-    # JWT
+    # Browser authentication
     jwt_secret_key: str = ""
-    access_token_expire_minutes: int = 1440  # 24 hours
+    csrf_secret_key: str = ""
+    jwt_issuer: str = "accoya-api"
+    jwt_audience: str = "accoya-web"
+    auth_cookie_secure: bool = False
     password_reset_token_expire_minutes: int = 15
 
     # SMTP
@@ -86,6 +99,24 @@ class Settings(BaseSettings):
 
     # Frontend URL (for reset password links)
     frontend_url: str = "http://localhost:5173"
+
+    @field_validator("cors_allowed_origins", mode="before")
+    @classmethod
+    def parse_cors_allowed_origins(cls, value: Any) -> list[str]:
+        """Accept a JSON array or a comma-delimited environment value."""
+
+        if isinstance(value, list):
+            return value
+        if not isinstance(value, str):
+            raise ValueError("CORS_ALLOWED_ORIGINS must be a list of origins")
+
+        stripped = value.strip()
+        if stripped.startswith("["):
+            parsed = json.loads(stripped)
+            if not isinstance(parsed, list):
+                raise ValueError("CORS_ALLOWED_ORIGINS must be a JSON array")
+            return [str(item).strip() for item in parsed]
+        return [item.strip() for item in stripped.split(",") if item.strip()]
 
 
 @lru_cache
