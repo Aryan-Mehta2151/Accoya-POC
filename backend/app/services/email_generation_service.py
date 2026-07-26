@@ -12,7 +12,7 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from agent.catalog import CATALOG_VERSION
 from agent.models import GenerationResult, GenerationStatus
@@ -22,6 +22,8 @@ from app.db.models import (
     AgentRun,
     AgentRunStatus,
     Email,
+    EmailDeliveryJob,
+    EmailDeliveryJobStatus,
     EmailGenerationJob,
     EmailGenerationJobStatus,
     EmailGenerationTrigger,
@@ -61,6 +63,15 @@ class EmailGenerationJobNotFoundError(LookupError):
 
 class IdempotencyKeyConflictError(ValueError):
     """An idempotency key already belongs to another lead."""
+
+
+class EmailGenerationConflictError(ValueError):
+    '''Generation is blocked by an unresolved outbound delivery.'''
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 class EmailGenerationPersistenceError(RuntimeError):
@@ -150,6 +161,28 @@ def enqueue_generation(
     if active is not None:
         return active
 
+    current_email = current_email_for_lead(db, canonical_lead_id)
+    if current_email is not None:
+        blocking_delivery = db.scalar(
+            select(EmailDeliveryJob.id)
+            .where(
+                EmailDeliveryJob.email_id == current_email.id,
+                EmailDeliveryJob.status.in_(
+                    (
+                        EmailDeliveryJobStatus.queued,
+                        EmailDeliveryJobStatus.running,
+                        EmailDeliveryJobStatus.delivery_unknown,
+                    )
+                ),
+            )
+            .limit(1)
+        )
+        if blocking_delivery is not None:
+            raise EmailGenerationConflictError(
+                'delivery_blocks_generation',
+                'Resolve the current email delivery before generating another draft',
+            )
+
     previous = _latest_job(db, canonical_lead_id)
     linked_job_id = retry_of_job_id or (previous.id if previous else None)
     effective_trigger = trigger
@@ -226,6 +259,7 @@ def emails_for_lead(db: Session, lead_id: str) -> list[Email]:
             select(Email)
             .join(AgentRun, Email.agent_run_id == AgentRun.id)
             .where(AgentRun.lead_id == lead_id)
+            .options(selectinload(Email.delivery_jobs))
             .order_by(Email.created_at.desc(), Email.id.desc())
         ).all()
     )
@@ -699,6 +733,7 @@ __all__ = [
     "ClaimedEmailGeneration",
     "EmailGenerationJobNotFoundError",
     "EmailGenerationJobNotRunningError",
+    "EmailGenerationConflictError",
     "EmailGenerationPersistenceError",
     "IdempotencyKeyConflictError",
     "LeadNotFoundError",

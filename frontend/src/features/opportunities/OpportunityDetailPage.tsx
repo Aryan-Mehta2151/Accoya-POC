@@ -9,8 +9,15 @@ import { queryKeys } from '../../lib/queryKeys';
 import { EmailWorkspace } from './EmailWorkspace';
 import styles from './opportunities.module.css';
 
-function generationIsActive(status: string | undefined) {
-  return status === 'queued' || status === 'running';
+function workIsActive(workspace: {
+  latest_generation?: { status: string } | null;
+  emails?: Array<{ latest_delivery?: { status: string } | null }>;
+} | undefined) {
+  const generationStatus = workspace?.latest_generation?.status;
+  if (generationStatus === 'queued' || generationStatus === 'running') return true;
+  return workspace?.emails?.some((email) => (
+    email.latest_delivery?.status === 'queued' || email.latest_delivery?.status === 'running'
+  )) ?? false;
 }
 
 const scoreFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
@@ -76,7 +83,7 @@ export function OpportunityDetailPage() {
     queryKey: queryKeys.leadWorkspace(leadId ?? ''),
     queryFn: () => api.getLeadWorkspace(leadId!),
     enabled: Boolean(leadId),
-    refetchInterval: (query) => generationIsActive(query.state.data?.latest_generation?.status) ? 2000 : false,
+    refetchInterval: (query) => workIsActive(query.state.data) ? 2000 : false,
     retry: (count, error) => !(error instanceof ApiError && error.status === 404) && count < 2,
   });
 

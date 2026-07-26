@@ -23,6 +23,9 @@ const email: Email = {
   subject: 'Accoya proposal',
   body: 'Hello Maya',
   status: 'pending_review',
+  latest_delivery: null,
+  has_unknown_delivery: false,
+  delivery_content_hash: 'b'.repeat(64),
   created_at: '2026-07-20T11:00:00Z',
   updated_at: '2026-07-21T11:00:00Z',
 };

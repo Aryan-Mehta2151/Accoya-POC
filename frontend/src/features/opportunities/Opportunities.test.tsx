@@ -7,12 +7,13 @@ import userEvent from '@testing-library/user-event';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { api } from '../../lib/api';
+import { api, ApiError } from '../../lib/api';
 import { queryKeys } from '../../lib/queryKeys';
 import type {
   EarlyBidSyncRunStatus,
   EarlyBidSyncStatus,
   Email,
+  EmailDeliveryJob,
   EmailGenerationJob,
   Lead,
   LeadWorkspace,
@@ -33,6 +34,7 @@ vi.mock('../../lib/api', async (importOriginal) => {
       queueEmailGeneration: vi.fn(),
       editEmail: vi.fn(),
       setEmailStatus: vi.fn(),
+      sendEmail: vi.fn(),
     },
   };
 });
@@ -70,6 +72,9 @@ const email = (overrides: Partial<Email> = {}): Email => ({
   subject: 'Accoya for Harbour Arts Centre',
   body: 'Hello Alex,\n\nA thoughtful message.',
   status: 'pending_review',
+  latest_delivery: null,
+  has_unknown_delivery: false,
+  delivery_content_hash: 'b'.repeat(64),
   created_at: '2026-07-02T00:00:00Z',
   updated_at: '2026-07-02T00:00:00Z',
   ...overrides,
@@ -89,6 +94,30 @@ const job = (overrides: Partial<EmailGenerationJob> = {}): EmailGenerationJob =>
   queued_at: '2026-07-02T00:00:00Z',
   claimed_at: null,
   heartbeat_at: null,
+  completed_at: null,
+  ...overrides,
+});
+
+const deliveryJob = (overrides: Partial<EmailDeliveryJob> = {}): EmailDeliveryJob => ({
+  id: 'delivery-1',
+  email_id: 'email-1',
+  retry_of_job_id: null,
+  status: 'queued',
+  requested_by: 'user-1',
+  idempotency_key: '00000000-0000-4000-8000-000000000002',
+  content_hash: 'b'.repeat(64),
+  message_id: '<delivery-1@example.com>',
+  sender_email: 'outreach@example.com',
+  recipient_email: 'alex@example.com',
+  subject: 'Accoya for Harbour Arts Centre',
+  body_snapshot: 'Hello Alex,\n\nA thoughtful message.',
+  error_code: null,
+  attempt_count: 0,
+  queued_at: '2026-07-02T00:02:00Z',
+  claimed_at: null,
+  heartbeat_at: null,
+  send_started_at: null,
+  accepted_at: null,
   completed_at: null,
   ...overrides,
 });
@@ -339,6 +368,7 @@ describe('Opportunity email workspace', () => {
   it('shows the generated email inline without generating on mount', async () => {
     renderAt('/opportunities/lead-1');
     expect(await screen.findByRole('heading', { name: 'Email workspace' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'To' })).toHaveValue('alex@example.com');
     expect(screen.getByRole('textbox', { name: 'Subject' })).toHaveValue('Accoya for Harbour Arts Centre');
     expect(screen.getAllByText('alex@example.com', { selector: 'dd' })).toHaveLength(2);
     expect(api.queueEmailGeneration).not.toHaveBeenCalled();
@@ -401,12 +431,238 @@ describe('Opportunity email workspace', () => {
 
     await user.click(screen.getByRole('button', { name: 'Save changes' }));
     await waitFor(() => expect(api.editEmail).toHaveBeenCalledWith('email-1', {
+      recipient_email: 'alex@example.com',
       subject: updated.subject,
       body: email().body,
     }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled());
     await user.click(screen.getByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(api.setEmailStatus).toHaveBeenCalledWith('email-1', 'approved'));
+  });
+
+  it('lets a reviewer add a missing recipient and blocks approval until it is saved', async () => {
+    const withoutRecipient = email({ recipient_email: null });
+    vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({ emails: [withoutRecipient] }));
+    vi.mocked(api.editEmail).mockResolvedValue(email({ recipient_email: 'reviewer@example.com' }));
+    const { user } = renderAt('/opportunities/lead-1');
+
+    const recipient = await screen.findByRole('textbox', { name: 'To' });
+    expect(recipient).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled();
+    expect(screen.getByText(/Add a valid recipient, subject, and message/i)).toBeInTheDocument();
+
+    await user.type(recipient, 'reviewer@example.com');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(api.editEmail).toHaveBeenCalledWith('email-1', {
+      recipient_email: 'reviewer@example.com',
+      subject: withoutRecipient.subject,
+      body: withoutRecipient.body,
+    }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled());
+  });
+
+  it('validates recipient edits while allowing a saved recipient to be cleared', async () => {
+    vi.mocked(api.editEmail).mockResolvedValue(email({ recipient_email: null }));
+    const { user } = renderAt('/opportunities/lead-1');
+    const recipient = await screen.findByRole('textbox', { name: 'To' });
+
+    await user.clear(recipient);
+    await user.type(recipient, 'not-an-email');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Enter a valid recipient email address.');
+    expect(api.editEmail).not.toHaveBeenCalled();
+
+    await user.clear(recipient);
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(api.editEmail).toHaveBeenCalledWith('email-1', {
+      recipient_email: null,
+      subject: email().subject,
+      body: email().body,
+    }));
+  });
+
+  it('returns an edited approved email to review before it can be sent', async () => {
+    const approved = email({ status: 'approved' });
+    vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({ emails: [approved] }));
+    vi.mocked(api.editEmail).mockResolvedValue(email({
+      recipient_email: 'new-recipient@example.com',
+      status: 'pending_review',
+    }));
+    const { user } = renderAt('/opportunities/lead-1');
+
+    const recipient = await screen.findByRole('textbox', { name: 'To' });
+    await user.clear(recipient);
+    await user.type(recipient, 'new-recipient@example.com');
+    expect(screen.getByText('Saving these changes will require approval again.')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByRole('button', { name: 'Approve' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Send email' })).not.toBeInTheDocument();
+  });
+
+  it('confirms and queues a real delivery with the current content hash', async () => {
+    const approved = email({ status: 'approved' });
+    vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({ emails: [approved] }));
+    vi.mocked(api.sendEmail).mockResolvedValue(deliveryJob());
+    const { user } = renderAt('/opportunities/lead-1');
+
+    await user.click(await screen.findByRole('button', { name: 'Send email' }));
+    const dialog = screen.getByRole('dialog');
+    const confirmation = within(dialog).getByText(/real external email/i);
+    expect(confirmation).toHaveTextContent('Recipient: alex@example.com');
+    expect(confirmation).toHaveTextContent('Subject: Accoya for Harbour Arts Centre');
+    await user.click(within(dialog).getByRole('button', { name: 'Send email' }));
+
+    await waitFor(() => expect(api.sendEmail).toHaveBeenCalledWith('email-1', {
+      idempotency_key: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      ),
+      expected_content_hash: 'b'.repeat(64),
+      acknowledge_duplicate_risk: false,
+    }));
+    expect(await screen.findByText('Email queued for delivery')).toBeInTheDocument();
+  });
+
+  it('reuses the delivery idempotency key after a network error', async () => {
+    const approved = email({ status: 'approved' });
+    vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({ emails: [approved] }));
+    vi.mocked(api.sendEmail)
+      .mockRejectedValueOnce(new ApiError({ status: 0, message: 'Connection interrupted' }))
+      .mockResolvedValueOnce(deliveryJob());
+    const { user } = renderAt('/opportunities/lead-1');
+
+    await user.click(await screen.findByRole('button', { name: 'Send email' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Send email' }));
+    await waitFor(() => expect(api.sendEmail).toHaveBeenCalledTimes(1));
+
+    expect(screen.getByRole('textbox', { name: 'To' })).toHaveAttribute('readonly');
+    expect(screen.getByRole('button', { name: 'Regenerate email' })).toBeDisabled();
+    expect(screen.getByText(/safely reuse the same request key/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Retry send' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Retry send' }));
+    await waitFor(() => expect(api.sendEmail).toHaveBeenCalledTimes(2));
+    const firstPayload = vi.mocked(api.sendEmail).mock.calls[0][1];
+    const secondPayload = vi.mocked(api.sendEmail).mock.calls[1][1];
+    expect(secondPayload.idempotency_key).toBe(firstPayload.idempotency_key);
+  });
+
+  it('uses a new idempotency key after a definitive API response', async () => {
+    const approved = email({ status: 'approved' });
+    vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({ emails: [approved] }));
+    vi.mocked(api.sendEmail)
+      .mockRejectedValueOnce(new ApiError({ status: 503, message: 'Delivery is not configured' }))
+      .mockResolvedValueOnce(deliveryJob());
+    const { user } = renderAt('/opportunities/lead-1');
+
+    await user.click(await screen.findByRole('button', { name: 'Send email' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Send email' }));
+    await waitFor(() => expect(api.sendEmail).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('textbox', { name: 'To' })).not.toHaveAttribute('readonly');
+
+    await user.click(screen.getByRole('button', { name: 'Send email' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Send email' }));
+    await waitFor(() => expect(api.sendEmail).toHaveBeenCalledTimes(2));
+    const firstPayload = vi.mocked(api.sendEmail).mock.calls[0][1];
+    const secondPayload = vi.mocked(api.sendEmail).mock.calls[1][1];
+    expect(secondPayload.idempotency_key).not.toBe(firstPayload.idempotency_key);
+  });
+
+  it('suppresses duplicate delivery submissions while the first request is pending', async () => {
+    const approved = email({ status: 'approved' });
+    vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({ emails: [approved] }));
+    let resolveDelivery!: (job: EmailDeliveryJob) => void;
+    vi.mocked(api.sendEmail).mockImplementation(() => new Promise((resolve) => {
+      resolveDelivery = resolve;
+    }));
+    const { user } = renderAt('/opportunities/lead-1');
+
+    await user.click(await screen.findByRole('button', { name: 'Send email' }));
+    await user.dblClick(within(screen.getByRole('dialog')).getByRole('button', { name: 'Send email' }));
+    expect(api.sendEmail).toHaveBeenCalledTimes(1);
+    act(() => resolveDelivery(deliveryJob()));
+    expect(await screen.findByText('Email queued for delivery')).toBeInTheDocument();
+  });
+
+  it('locks the editor and refreshes every two seconds while delivery is active', async () => {
+    const intervalSpy = vi.spyOn(window, 'setInterval');
+    const active = email({ status: 'approved', latest_delivery: deliveryJob({ status: 'running' }) });
+    vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({ emails: [active] }));
+    renderAt('/opportunities/lead-1');
+
+    expect(await screen.findByText('Sending email')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'To' })).toHaveAttribute('readonly');
+    expect(screen.getByRole('button', { name: 'Sending...' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Regenerate email' })).toBeDisabled();
+    await waitFor(() => expect(intervalSpy.mock.calls.some((call) => call[1] === 2_000)).toBe(true));
+    intervalSpy.mockRestore();
+  });
+
+  it('offers a normal retry after definite failure and warns before an uncertain resend', async () => {
+    const uncertain = email({
+      status: 'approved',
+      latest_delivery: deliveryJob({
+        status: 'delivery_unknown',
+        error_code: 'smtp_outcome_unknown',
+        completed_at: '2026-07-02T00:03:00Z',
+      }),
+      has_unknown_delivery: true,
+    });
+    vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({ emails: [uncertain] }));
+    vi.mocked(api.sendEmail).mockResolvedValue(deliveryJob({
+      id: 'delivery-2',
+      retry_of_job_id: 'delivery-1',
+    }));
+    const { user } = renderAt('/opportunities/lead-1');
+
+    expect(await screen.findByText('Delivery status is uncertain')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Regenerate email' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Send again anyway' }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText(/could create a duplicate/i)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Send again anyway' }));
+    await waitFor(() => expect(api.sendEmail).toHaveBeenCalledWith('email-1', expect.objectContaining({
+      acknowledge_duplicate_risk: true,
+    })));
+
+    cleanup();
+    vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({
+      emails: [email({
+        status: 'approved',
+        latest_delivery: deliveryJob({ status: 'failed', error_code: 'smtp_rejected' }),
+      })],
+    }));
+    renderAt('/opportunities/lead-1');
+    expect(await screen.findByRole('button', { name: 'Retry send' })).toBeEnabled();
+    expect(screen.getByText('Email could not be sent')).toBeInTheDocument();
+  });
+
+  it('retains an unknown-delivery warning when edits require reapproval', async () => {
+    const uncertain = email({
+      status: 'approved',
+      latest_delivery: deliveryJob({ status: 'delivery_unknown', completed_at: '2026-07-02T00:03:00Z' }),
+      has_unknown_delivery: true,
+    });
+    const edited = email({
+      status: 'pending_review',
+      subject: 'Updated after uncertain delivery',
+      latest_delivery: uncertain.latest_delivery,
+      has_unknown_delivery: true,
+    });
+    vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({ emails: [uncertain] }));
+    vi.mocked(api.editEmail).mockResolvedValue(edited);
+    vi.mocked(api.setEmailStatus).mockResolvedValue({ ...edited, status: 'approved' });
+    const { user } = renderAt('/opportunities/lead-1');
+
+    const subject = await screen.findByRole('textbox', { name: 'Subject' });
+    await user.clear(subject);
+    await user.type(subject, edited.subject);
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByRole('button', { name: 'Approve' })).toBeEnabled();
+    expect(screen.getByText('Delivery status is uncertain')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Send again anyway' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    expect(await screen.findByRole('button', { name: 'Send again anyway' })).toBeEnabled();
   });
 
   it('opens historical drafts read-only from the email query parameter', async () => {

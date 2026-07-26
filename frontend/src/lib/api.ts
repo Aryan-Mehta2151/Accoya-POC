@@ -4,6 +4,7 @@ import type {
   CsvUploadResult,
   EarlyBidSyncStatus,
   Email,
+  EmailDeliveryJob,
   EmailGenerationJob,
   EmailStatus,
   Lead,
@@ -155,7 +156,10 @@ export const api = {
   listEmails: () => request<Email[]>('/emails'),
   getEmail: (emailId: string) =>
     request<Email>(`/emails/${encodeURIComponent(emailId)}`),
-  editEmail: (emailId: string, payload: { subject?: string; body?: string }) =>
+  editEmail: (
+    emailId: string,
+    payload: { recipient_email?: string | null; subject?: string; body?: string },
+  ) =>
     request<Email>(`/emails/${encodeURIComponent(emailId)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -167,6 +171,26 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status }),
     }),
+  sendEmail: (
+    emailId: string,
+    payload: {
+      idempotency_key: string;
+      expected_content_hash: string;
+      acknowledge_duplicate_risk: boolean;
+    },
+  ) => {
+    const token = typeof window === 'undefined'
+      ? null
+      : window.localStorage.getItem('access_token');
+    return request<EmailDeliveryJob>(`/emails/${encodeURIComponent(emailId)}/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+  },
 
   listDocuments: () => request<StrategyDocument[]>('/documents'),
   uploadDocument: (file: File) => {

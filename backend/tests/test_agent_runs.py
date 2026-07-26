@@ -306,7 +306,11 @@ class AgentRunTests(unittest.TestCase):
 
         edited = self.client.patch(
             f"/api/emails/{email_id}",
-            json={"subject": "Reviewed subject", "body": "Reviewed body"},
+            json={
+                "recipient_email": "reviewer@example.com",
+                "subject": "Reviewed subject",
+                "body": "Reviewed body",
+            },
         )
         self.assertEqual(edited.status_code, 200)
         approved = self.client.post(

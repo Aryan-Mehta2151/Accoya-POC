@@ -39,6 +39,11 @@ def create_agent_run(
         )
     except email_generation_service.LeadNotFoundError:
         raise HTTPException(status_code=404, detail="Lead not found") from None
+    except email_generation_service.EmailGenerationConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={'code': exc.code, 'message': exc.message},
+        ) from None
     except email_generation_service.EmailGenerationPersistenceError:
         raise HTTPException(
             status_code=500,
@@ -100,6 +105,11 @@ def retry_agent_run(
         )
     except email_generation_service.LeadNotFoundError:
         raise HTTPException(status_code=404, detail="Lead not found") from None
+    except email_generation_service.EmailGenerationConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={'code': exc.code, 'message': exc.message},
+        ) from None
     except email_generation_service.EmailGenerationPersistenceError:
         raise HTTPException(
             status_code=500,

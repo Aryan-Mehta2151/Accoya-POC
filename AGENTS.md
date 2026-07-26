@@ -7,8 +7,10 @@ This file applies to the entire repository. There are currently no nested
 source of truth when they disagree with a README; known documentation drift is
 listed below.
 
-This is an unauthenticated proof of concept, not a production-ready service. It
-handles contact data and can call live, billable, or mutating external services.
+This is a largely unauthenticated proof of concept, not a production-ready
+service. The real-send endpoint requires the existing JWT, but other business
+routes remain unprotected. It handles contact data and can call live, billable,
+or mutating external services.
 
 ## What this project does
 
@@ -17,8 +19,9 @@ manually and through a durable daily-midnight scheduler, stores them as leads,
 uploads marketing strategy documents to S3, retrieves
 strategy and nurturing context through an AWS Bedrock Knowledge Base, generates
 outreach emails through a LangGraph/Gemini agent, supports a human-review status
-workflow, and exposes a knowledge-base chatbot. New leads durably queue their
-first email for a separate worker. A React SPA provides Overview,
+workflow and durable SMTP delivery, and exposes a knowledge-base chatbot. New
+leads durably queue their first email for a separate generation worker, while
+approved messages queue delivery for a separate SMTP worker. A React SPA provides Overview,
 Opportunities with inline outreach review, Strategy Docs, and Chatbot tabs.
 
 The backend stack is FastAPI, Pydantic 2, synchronous SQLAlchemy 2, PostgreSQL,
@@ -43,6 +46,8 @@ TypeScript 6, Vite 8, native `fetch`, and global CSS.
   Bedrock, Gemini, email-agent integration, durable generation jobs, and RAG.
 - `backend/app/workers/email_generation.py`: separately started PostgreSQL
   queue worker; the FastAPI process never performs queued provider work.
+- `backend/app/workers/email_delivery.py`: separately started PostgreSQL queue
+  worker that is solely responsible for live outreach SMTP calls.
 - `backend/app/workers/earlybid_sync.py`: separately started PostgreSQL
   scheduler/worker for current-day local-midnight EarlyBid synchronization.
 - `backend/agent/`: standalone synchronous Accoya email agent, including
@@ -84,6 +89,8 @@ python -m uvicorn app.main:app --reload
 # In a second backend terminal with the same environment:
 python -m app.workers.email_generation
 # In a third backend terminal with the same environment:
+python -m app.workers.email_delivery
+# In a fourth backend terminal with the same environment:
 python -m app.workers.earlybid_sync
 ```
 
@@ -94,9 +101,11 @@ Alembic head; it never creates or upgrades tables. `python -m app.db.bootstrap`
 creates the configured PostgreSQL database when absent and idempotently applies
 all migrations. Run it after changing `DATABASE_URL` or pulling a migration.
 Run one instance of each worker by default for this POC. PostgreSQL claims make
-multiple instances safe, and queued work survives process restarts. The email
-worker exits when provider configuration is incomplete; the sync worker exits
-when EarlyBid/schedule configuration is invalid.
+multiple instances safe, and queued work survives process restarts. The
+generation worker exits when model configuration is incomplete, the delivery
+worker exits when SMTP or lease configuration is invalid, and the sync worker exits
+when EarlyBid/schedule configuration is invalid. Starting the delivery worker
+authorizes real outbound email for already queued approved messages.
 
 ### Frontend
 
@@ -126,14 +135,17 @@ any other tracked file.
 | S3 | `S3_BUCKET_STRATEGY_DOCS` | Required for document list/upload/delete. |
 | Bedrock KB | `BEDROCK_KB_ID`, `BEDROCK_KB_MODEL_ARN`, `BEDROCK_KB_TOP_K` | The model setting accepts a model ID or full ARN. |
 | Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_REQUEST_TIMEOUT_SECONDS` | Used by the worker's email agent; the timeout applies to each Gemini request. The active chat route does not use Gemini. |
-| Email worker | `EMAIL_GENERATION_WORKER_POLL_SECONDS`, `EMAIL_GENERATION_HEARTBEAT_SECONDS`, `EMAIL_GENERATION_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. Keep the stale threshold safely above the heartbeat interval. |
+| Generation worker | `EMAIL_GENERATION_WORKER_POLL_SECONDS`, `EMAIL_GENERATION_HEARTBEAT_SECONDS`, `EMAIL_GENERATION_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. Keep the stale threshold safely above the heartbeat interval. |
+| Delivery worker | `EMAIL_DELIVERY_WORKER_POLL_SECONDS`, `EMAIL_DELIVERY_HEARTBEAT_SECONDS`, `EMAIL_DELIVERY_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. Keep stale safely above heartbeat. |
+| SMTP delivery | `SMTP_HOST`, `SMTP_PORT`, `SMTP_EMAIL`, `SMTP_PASSWORD`, `SMTP_TIMEOUT_SECONDS` | Required by the delivery worker; timeout defaults to 30 seconds. The worker uses authenticated STARTTLS and stable Message-IDs; a timeout may produce an unknown outcome. |
+| Authentication | `JWT_SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES` | The real-send endpoint requires a valid Bearer JWT and a nonblank signing secret; other business routes remain unprotected. |
 | EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Sync uses Bearer auth; reseller/client also scope derived natural identities. |
 | Daily sync | `LEAD_AUTO_SYNC_TIMEZONE`, `LEAD_AUTO_SYNC_POLL_SECONDS`, `LEAD_AUTO_SYNC_HEARTBEAT_SECONDS`, `LEAD_AUTO_SYNC_STALE_SECONDS` | Defaults to `America/Los_Angeles`, 30, 15, and 300 seconds. Use an IANA timezone and keep stale greater than heartbeat. |
 | Frontend | `VITE_API_BASE_URL` | Optional; include `/api` unless `API_PREFIX` was changed. |
 
 `get_settings()` is cached, and multiple modules retain the returned object at
-module scope. Restart the backend and both workers after changing environment
-values.
+module scope. Restart the backend and all three workers after changing
+environment values.
 
 ## Implemented request and data flows
 
@@ -180,6 +192,16 @@ values.
   `AgentRun`, calls providers outside database transactions, heartbeats, and
   atomically finalizes the job/run/email/status event. Failures and stale jobs
   are terminal and are never automatically replayed.
+- Email-delivery jobs: JWT-authenticated `POST /api/emails/{email_id}/send`
+  idempotently queues a snapshotted sender, recipient, subject, and body and
+  returns 202. It requires the current approved email, valid saved content, and
+  a matching delivery-content hash. At most one queued/running job exists per
+  email. The separately started worker claims with PostgreSQL `SKIP LOCKED`,
+  releases database locks before SMTP, heartbeats its lease, and atomically
+  records relay acceptance plus the `sent` status event. Definite failures
+  leave the email approved. Timeouts, submission disconnects, and stale leases
+  become `delivery_unknown` and are never automatically retried; a user must
+  explicitly acknowledge duplicate risk before resending.
 - Agent runs: a worker claim creates and commits a `running` record before
   provider work, then finalizes it as `generated`, `insufficient_context`,
   `provider_error`, or `system_error`. `GET
@@ -190,10 +212,14 @@ values.
   draft, code versions, and aggregate telemetry.
 - Opportunity workspace: `GET /api/leads/{lead_id}/workspace` returns the lead,
   newest-first email history, current email ID, input-staleness flag, and latest
-  generation. `GET /api/emails/{email_id}` supports legacy deep links. Email
-  responses expose the stored recipient snapshot. A generated run's original
-  draft remains immutable while subject/body edits affect the review email and
-  each status transition appends an `email_status_events` row. The old
+  generation and delivery state. `GET /api/emails/{email_id}` supports legacy
+  deep links. Email responses expose the editable stored recipient snapshot,
+  initially copied from the opportunity contact so later feed updates cannot
+  silently retarget a draft. A generated run's original draft remains immutable
+  while recipient/subject/body edits affect the review email and each status
+  transition appends an `email_status_events` row. Approval requires a valid
+  saved recipient and nonblank content; editing approved content returns it to
+  pending review. Clients cannot directly set `sent`. The old
   generation endpoints remain only as deprecated queue adapters; HTTP request
   handlers never call the provider.
 - Agent diagnostics: `/api/agent/*` accepts raw lead mappings and can expose
@@ -217,10 +243,15 @@ values.
   from the environment in feature modules.
 - Keep queue operations transactionally durable and idempotent. Do not add a
   browser mount effect, FastAPI background task, or in-memory queue as a second
-  generation path.
+  generation or delivery path.
 - Do not hold a database transaction or row lock across Gemini/Bedrock calls.
   Preserve `SKIP LOCKED` job claiming, heartbeat/stale-job handling, one active
   job per lead, and no automatic queue-level retry.
+- Never hold a database transaction or row lock across SMTP. Preserve
+  `SKIP LOCKED` delivery claiming, independent heartbeats, one active delivery
+  per email, stable Message-IDs, exact confirmed-content snapshots, and no
+  automatic replay of `delivery_unknown`. Only the delivery worker may set an
+  email to `sent` after relay acceptance.
 - Keep daily scheduling in the separate worker, based on local calendar dates
   and timezone-aware midnight conversion. Preserve current-day-only catch-up,
   the unique feed/date identity, bounded retry classification, and atomic
@@ -230,6 +261,9 @@ values.
   within the four-attempt limit.
 - Use FastAPI dependencies for database sessions and response models for typed
   endpoints. Existing database and external clients are synchronous.
+- Keep the real-send endpoint JWT-protected and validate its expected content
+  hash under the email row lock. Do not infer authentication for the remaining
+  business routes without a separate authorization change.
 - Translate expected integration failures into useful HTTP errors without
   exposing credentials. The existing convention generally uses 502 for an
   upstream failure and 404 for a missing local record.
@@ -264,6 +298,9 @@ values.
 - Keep `types.ts` and `api.ts` synchronized with backend response models and
   paths. Preserve snake_case JSON field names unless both sides intentionally
   change.
+- Send the stored Bearer JWT only for real delivery, retain one idempotency key
+  across a network-error retry, and poll while delivery is queued/running.
+  Never automatically acknowledge or retry an unknown delivery outcome.
 - Styles are global; reuse existing classes/variables or account for both CSS
   files. No component library or state-management package is installed.
 - Change dependencies through npm and commit `package.json` and
@@ -278,10 +315,12 @@ Run the checks relevant to the changed area from the indicated directory.
 python -m compileall -q app agent alembic
 python -m unittest discover -s agent/tests -t . -p "test_*.py"
 python -m unittest tests.test_email_generation_queue -v
+python -m unittest tests.test_email_delivery_queue -v
 python -m unittest tests.test_earlybid_sync_scheduler -v
 python -m unittest discover -s tests -v
 
 # frontend/
+npm run test:run -- src/features/opportunities/Opportunities.test.tsx src/lib/api.test.ts
 npm run lint
 npm run build
 ```
@@ -292,11 +331,11 @@ whose name ends in `_test`:
 ```powershell
 # backend/; never point this at accoya_agent or another non-test database.
 $env:ACCOYA_TEST_DATABASE_URL="postgresql+psycopg2://postgres:YOUR_PASSWORD@localhost:5433/accoya_agent_test"
-python -m unittest tests.test_postgres_agent_database -v
+python -m unittest tests.test_postgres_agent_database tests.test_postgres_email_delivery -v
 Remove-Item Env:ACCOYA_TEST_DATABASE_URL
 ```
 
-It provisions/migrates the test database and cleans only its agent-subsystem
+They provision/migrate the test database and clean only their application
 rows. For API smoke testing, start a deliberately configured local backend and
 check `/health` and `/docs`; startup connects to PostgreSQL and validates its
 Alembic revision but does not change schema. Routine backend tests use isolated
@@ -316,6 +355,13 @@ workspace ordering/staleness, all worker terminal outcomes, sync never invoking
 the provider, stale leases, and PostgreSQL concurrency/index behavior. Do not
 start the live worker as an automated smoke test.
 
+Delivery coverage must fake SMTP and include recipient default/edit/clear,
+approval and reapproval rules, JWT enforcement, content-hash staleness,
+idempotency and concurrent enqueueing, relay acceptance, definite failure,
+unknown outcomes, stable Message-IDs, stale leases, and the absence of
+automatic resend. Never start the live delivery worker or contact SMTP in an
+automated check.
+
 Scheduler coverage must use fixed clocks and fake EarlyBid responses. Cover
 timezone/DST midnight conversion, current-day-only catch-up, unique schedules,
 historical supersession and late-result rejection, due claims,
@@ -330,21 +376,26 @@ automated verification.
 - `.env`, virtual environments, `node_modules`, build output, logs, local
   SQLite files, and temp files are ignored. Do not commit secrets, real lead
   CSVs, contact data, or captured API payloads.
-- The API has no authentication or authorization. Do not expose it publicly in
-  its current form.
+- Only the real-send endpoint enforces the existing JWT; the remaining business
+  API has no authorization. Do not expose it publicly in its current form.
 - Treat manual/scheduled lead sync and CSV upload as PostgreSQL/PII writes that
-  automatically queue one draft for every new lead. Running either worker,
-  document upload/delete/list, manual regeneration, and chat can call live,
-  billable, or mutating integrations. Do not use them as automated checks
-  without explicit authorization and non-production resources.
+  automatically queue one draft for every new lead. Running the generation or
+  sync worker, document upload/delete/list, manual regeneration, and chat can
+  call live, billable, or mutating integrations. Do not use them as automated
+  checks without explicit authorization and non-production resources.
 - Document upload does not trigger a Bedrock KB ingestion job.
-- Email status changes do not send mail, and `sent` emails are not indexed into
-  the KB. The UI's "Send to client" action only changes the status.
+- Email status changes alone do not send mail. The authenticated Send Email
+  action queues a real external message, and starting the delivery worker
+  explicitly authorizes SMTP delivery. `sent` means the relay accepted the
+  message, not guaranteed inbox delivery; sent emails are not indexed into the
+  KB. Unknown delivery is never replayed automatically because that could send
+  a duplicate.
 - AWS deployment and process supervision remain out of scope. Alembic is
   configured with a clean baseline; legacy import/backfill is out of scope.
-- Deploy the database migration, web API, and both separately supervised
-  workers together. Starting the sync worker authorizes recurring live EarlyBid
-  calls; do not infer authorization to replay prior dates or backfill leads.
+- Deploy the database migration, web API, and all three separately supervised
+  workers together. Starting the delivery worker authorizes queued live SMTP
+  sends. Starting the sync worker authorizes recurring live EarlyBid calls; do
+  not infer authorization to replay prior dates or backfill leads.
 - EarlyBid supplies no immutable opportunity ID. Project renames or location
   corrections produce new natural identities; automatic reconciliation is out
   of scope.

@@ -77,6 +77,36 @@ export type EmailStatus =
   | 'sent'
   | 'rejected';
 
+export type EmailDeliveryJobStatus =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'delivery_unknown';
+
+export type EmailDeliveryJob = {
+  id: string;
+  email_id: string;
+  retry_of_job_id: string | null;
+  status: EmailDeliveryJobStatus;
+  requested_by: string;
+  idempotency_key: string;
+  content_hash: string;
+  message_id: string;
+  sender_email: string;
+  recipient_email: string;
+  subject: string;
+  body_snapshot: string;
+  error_code: string | null;
+  attempt_count: number;
+  queued_at: string;
+  claimed_at: string | null;
+  heartbeat_at: string | null;
+  send_started_at: string | null;
+  accepted_at: string | null;
+  completed_at: string | null;
+};
+
 export type Email = {
   id: string;
   lead_id: string;
@@ -84,6 +114,9 @@ export type Email = {
   subject: string;
   body: string;
   status: EmailStatus;
+  latest_delivery: EmailDeliveryJob | null;
+  has_unknown_delivery: boolean;
+  delivery_content_hash: string;
   created_at: string;
   updated_at: string;
 };

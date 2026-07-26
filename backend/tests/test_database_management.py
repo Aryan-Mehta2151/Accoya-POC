@@ -20,7 +20,7 @@ class SchemaValidationTests(unittest.TestCase):
 
     def test_missing_revision_is_rejected_and_head_is_accepted(self) -> None:
         expected_heads = database.get_expected_schema_heads()
-        self.assertEqual(expected_heads, ("0005_earlybid_daily_sync",))
+        self.assertEqual(expected_heads, ("0006_email_delivery_queue",))
 
         with patch.object(database, "engine", self.engine):
             with self.assertRaisesRegex(RuntimeError, "not at the required"):

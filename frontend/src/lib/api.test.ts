@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 import { api, ApiError } from './api';
@@ -7,7 +7,10 @@ const base = 'http://localhost:8000/api';
 const server = setupServer();
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
-afterEach(() => server.resetHandlers());
+afterEach(() => {
+  server.resetHandlers();
+  vi.unstubAllGlobals();
+});
 afterAll(() => server.close());
 
 describe('API client', () => {
@@ -100,6 +103,55 @@ describe('API client', () => {
       code: 'insufficient_context',
       message: 'The lead needs more context.',
       warnings: ['Add a recipient or project summary.'],
+    });
+  });
+
+  it('sends the stored bearer token and idempotent delivery payload', async () => {
+    let capturedAuthorization: string | null = null;
+    let capturedBody: unknown;
+    vi.stubGlobal('window', {
+      localStorage: { getItem: (key: string) => key === 'access_token' ? 'signed-jwt' : null },
+    });
+    server.use(
+      http.post(`${base}/emails/email-1/send`, async ({ request }) => {
+        capturedAuthorization = request.headers.get('Authorization');
+        capturedBody = await request.json();
+        return HttpResponse.json({
+          id: 'delivery-1',
+          email_id: 'email-1',
+          retry_of_job_id: null,
+          status: 'queued',
+          requested_by: 'user-1',
+          idempotency_key: '00000000-0000-4000-8000-000000000002',
+          content_hash: 'b'.repeat(64),
+          message_id: '<delivery-1@example.com>',
+          sender_email: 'outreach@example.com',
+          recipient_email: 'alex@example.com',
+          subject: 'Accoya proposal',
+          body_snapshot: 'Hello Alex',
+          error_code: null,
+          attempt_count: 0,
+          queued_at: '2026-07-02T00:00:00Z',
+          claimed_at: null,
+          heartbeat_at: null,
+          send_started_at: null,
+          accepted_at: null,
+          completed_at: null,
+        }, { status: 202 });
+      }),
+    );
+
+    await api.sendEmail('email-1', {
+      idempotency_key: '00000000-0000-4000-8000-000000000002',
+      expected_content_hash: 'b'.repeat(64),
+      acknowledge_duplicate_risk: false,
+    });
+
+    expect(capturedAuthorization).toBe('Bearer signed-jwt');
+    expect(capturedBody).toEqual({
+      idempotency_key: '00000000-0000-4000-8000-000000000002',
+      expected_content_hash: 'b'.repeat(64),
+      acknowledge_duplicate_risk: false,
     });
   });
 

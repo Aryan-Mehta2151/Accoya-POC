@@ -73,6 +73,14 @@ class EmailGenerationTrigger(str, enum.Enum):
     retry = "retry"
 
 
+class EmailDeliveryJobStatus(str, enum.Enum):
+    queued = 'queued'
+    running = 'running'
+    succeeded = 'succeeded'
+    failed = 'failed'
+    delivery_unknown = 'delivery_unknown'
+
+
 class EarlyBidSyncRunStatus(str, enum.Enum):
     queued = "queued"
     running = "running"
@@ -90,6 +98,10 @@ _EMAIL_GENERATION_JOB_STATUS = Enum(
 _EMAIL_GENERATION_TRIGGER = Enum(
     EmailGenerationTrigger,
     name="email_generation_trigger",
+)
+_EMAIL_DELIVERY_JOB_STATUS = Enum(
+    EmailDeliveryJobStatus,
+    name='email_delivery_job_status',
 )
 _EARLYBID_SYNC_RUN_STATUS = Enum(
     EarlyBidSyncRunStatus,
@@ -604,11 +616,169 @@ class Email(Base):
         order_by="EmailStatusEvent.created_at",
     )
 
+    delivery_jobs: Mapped[list[EmailDeliveryJob]] = relationship(
+        back_populates='email',
+        cascade='all, delete-orphan',
+        passive_deletes=True,
+        order_by=lambda: (
+            EmailDeliveryJob.queued_at.desc(),
+            EmailDeliveryJob.id.desc(),
+        ),
+    )
+
     @property
     def lead_id(self) -> str:
         """Keep the existing EmailRead wire shape without duplicating lead_id."""
 
         return self.agent_run.lead_id
+
+
+    @property
+    def latest_delivery(self) -> EmailDeliveryJob | None:
+        '''Return the newest durable delivery attempt for API responses.'''
+
+        return self.delivery_jobs[0] if self.delivery_jobs else None
+
+    @property
+    def has_unknown_delivery(self) -> bool:
+        '''Flag attempts whose relay-acceptance outcome remains ambiguous.'''
+
+        return any(
+            job.status is EmailDeliveryJobStatus.delivery_unknown
+            for job in self.delivery_jobs
+        )
+
+    @property
+    def delivery_content_hash(self) -> str:
+        '''Expose an optimistic concurrency token for send confirmation.'''
+
+        from app.email_content import email_content_hash
+
+        return email_content_hash(self.recipient_email, self.subject, self.body)
+
+
+class EmailDeliveryJob(Base):
+    '''One immutable, durable attempt to deliver approved outreach.'''
+
+    __tablename__ = 'email_delivery_jobs'
+    __table_args__ = (
+        CheckConstraint(
+            'length(content_hash) = 64',
+            name='ck_email_delivery_jobs_content_hash_sha256',
+        ),
+        CheckConstraint(
+            'attempt_count >= 0',
+            name='ck_email_delivery_jobs_attempt_count_nonnegative',
+        ),
+        CheckConstraint(
+            '''(status = 'queued' AND attempt_count = 0
+            AND claimed_by IS NULL AND claimed_at IS NULL
+            AND heartbeat_at IS NULL AND send_started_at IS NULL
+            AND accepted_at IS NULL AND completed_at IS NULL
+            AND error_code IS NULL) OR
+            (status = 'running' AND attempt_count > 0
+            AND claimed_by IS NOT NULL AND claimed_at IS NOT NULL
+            AND heartbeat_at IS NOT NULL AND send_started_at IS NOT NULL
+            AND accepted_at IS NULL
+            AND completed_at IS NULL AND error_code IS NULL) OR
+            (status = 'succeeded' AND attempt_count > 0
+            AND claimed_by IS NOT NULL AND claimed_at IS NOT NULL
+            AND heartbeat_at IS NOT NULL AND send_started_at IS NOT NULL
+            AND accepted_at IS NOT NULL AND completed_at IS NOT NULL
+            AND error_code IS NULL) OR
+            (status IN ('failed', 'delivery_unknown') AND attempt_count > 0
+            AND claimed_by IS NOT NULL AND claimed_at IS NOT NULL
+            AND heartbeat_at IS NOT NULL AND send_started_at IS NOT NULL
+            AND accepted_at IS NULL
+            AND completed_at IS NOT NULL AND error_code IS NOT NULL)''',
+            name='ck_email_delivery_jobs_lifecycle',
+        ),
+        UniqueConstraint(
+            'idempotency_key',
+            name='uq_email_delivery_jobs_idempotency_key',
+        ),
+        UniqueConstraint(
+            'message_id',
+            name='uq_email_delivery_jobs_message_id',
+        ),
+        Index(
+            'ix_email_delivery_jobs_one_active_per_email',
+            'email_id',
+            unique=True,
+            postgresql_where=text('''status IN ('queued', 'running')'''),
+            sqlite_where=text('''status IN ('queued', 'running')'''),
+        ),
+        Index(
+            'ix_email_delivery_jobs_status_queued_at',
+            'status',
+            'queued_at',
+        ),
+        Index(
+            'ix_email_delivery_jobs_email_queued_at',
+            'email_id',
+            'queued_at',
+        ),
+        Index(
+            'ix_email_delivery_jobs_retry_of_job_id',
+            'retry_of_job_id',
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
+    email_id: Mapped[str] = mapped_column(
+        _UUID,
+        ForeignKey('emails.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    retry_of_job_id: Mapped[str | None] = mapped_column(
+        _UUID,
+        ForeignKey('email_delivery_jobs.id', ondelete='SET NULL'),
+    )
+    status: Mapped[EmailDeliveryJobStatus] = mapped_column(
+        _EMAIL_DELIVERY_JOB_STATUS,
+        nullable=False,
+        default=EmailDeliveryJobStatus.queued,
+        server_default=EmailDeliveryJobStatus.queued.value,
+    )
+    requested_by: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    sender_email: Mapped[str] = mapped_column(Text, nullable=False)
+    recipient_email: Mapped[str] = mapped_column(Text, nullable=False)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    body_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(Text)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default='0',
+    )
+    claimed_by: Mapped[str | None] = mapped_column(Text)
+    queued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    send_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    email: Mapped[Email] = relationship(back_populates='delivery_jobs')
+    retry_of: Mapped[EmailDeliveryJob | None] = relationship(
+        remote_side='EmailDeliveryJob.id',
+        back_populates='retries',
+        foreign_keys=[retry_of_job_id],
+    )
+    retries: Mapped[list[EmailDeliveryJob]] = relationship(
+        back_populates='retry_of',
+        foreign_keys=[retry_of_job_id],
+    )
 
 
 class EmailStatusEvent(Base):

@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     email_generation_heartbeat_seconds: float = 15.0
     email_generation_stale_seconds: float = 300.0
 
+    # Durable SMTP delivery worker
+    email_delivery_worker_poll_seconds: float = 2.0
+    email_delivery_heartbeat_seconds: float = 15.0
+    email_delivery_stale_seconds: float = 300.0
+
     # Lead source API (EarlyBid feed)
     lead_api_base_url: str = "https://api.earlybid.bid"
     lead_api_key: str | None = None
@@ -76,6 +81,8 @@ class Settings(BaseSettings):
     smtp_port: int = 587
     smtp_email: str = ""
     smtp_password: str = ""
+
+    smtp_timeout_seconds: float = 30.0
 
     # Frontend URL (for reset password links)
     frontend_url: str = "http://localhost:5173"

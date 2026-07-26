@@ -3,15 +3,18 @@
 A proof of concept that ingests EarlyBid construction opportunities manually
 or on a durable daily schedule, queues personalized Accoya nurturing emails for
 background generation, supports human review on each opportunity, manages
-strategy documents, and provides a knowledge-base chatbot. The browser has
-JWT-backed sign-in screens, but the lead, email, document, and chat API routes
-do not yet enforce authentication; do not expose this POC publicly.
+strategy documents, durably delivers approved outreach through SMTP, and
+provides a knowledge-base chatbot. The real-send endpoint requires the
+browser's JWT; most lead, email-review, document, and chat routes remain
+unauthenticated, so do not expose this POC publicly.
 
-The backend separates requested work from provider execution. Every request is
-first represented by a durable `email_generation_jobs` record, and every
-claimed attempt is represented by an `agent_runs` record, including expected
-and unexpected failures. The standalone agent remains database-independent;
-FastAPI owns queueing, persistence, and the production-safe API contracts.
+The backend separates requested work from provider execution. Every generation
+request is first represented by a durable `email_generation_jobs` record, and
+every claimed generation attempt is represented by an `agent_runs` record,
+including expected and unexpected failures. Every real-send request is first
+represented by an `email_delivery_jobs` record. The standalone agent remains
+database-independent; FastAPI owns queueing, persistence, and the
+production-safe API contracts.
 
 ## Architecture
 
@@ -41,6 +44,10 @@ manual sync -------------------------------`
                                                                        |
                                                                        `-> review email
                                                                             + status events
+                                                                                 |
+                                                                                 `-> delivery job
+                                                                                        |
+                                                                                        `-> separate SMTP worker
 ```
 
 The worker's successful agent path performs these stages in order:
@@ -173,7 +180,32 @@ missing. It does not automatically replay an ambiguous provider call:
 `insufficient_context`, provider failures, system failures, and abandoned
 leases remain terminal until a user explicitly retries.
 
-### 4. Start the daily EarlyBid sync worker
+### 4. Start the email-delivery worker
+
+Configure `JWT_SECRET_KEY`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_EMAIL`, and
+`SMTP_PASSWORD` in `backend/.env`. Then, in another backend terminal, start
+one delivery worker:
+
+```powershell
+cd backend
+.\.venv\Scripts\Activate.ps1
+python -m app.workers.email_delivery
+```
+
+The authenticated Send Email action only queues durable work. This separately
+supervised worker is the process that can contact SMTP and send real external
+email. Starting it is therefore explicit authorization to deliver any queued,
+approved outreach using the configured account. Do not start it as a health
+check or automated test.
+
+The worker records relay acceptance as `succeeded` and then marks the review
+email `sent`. Relay acceptance means the SMTP server accepted responsibility
+for the message; it does not guarantee inbox placement. Definite failures leave
+the email approved for an explicit retry. Ambiguous timeouts, disconnects, and
+expired leases become `delivery_unknown` and are never retried automatically
+because the first message may already have been accepted.
+
+### 5. Start the daily EarlyBid sync worker
 
 In another backend terminal, start one scheduler worker:
 
@@ -200,7 +232,7 @@ to start with missing configuration. Authentication errors, other HTTP 4xx
 responses, invalid feeds, and a configuration failure discovered after startup
 terminate the current run without retrying it.
 
-### 5. Start the React frontend
+### 6. Start the React frontend
 
 In another terminal:
 
@@ -217,9 +249,9 @@ API base, including the prefix. FastAPI allows the local `localhost` and
 
 Create an account with the email/password signup form on `/login`, then use
 that account to enter the application. The JWT is stored by the browser for UI
-session state. The shared lead/email/document/chat API client does not yet send
-that token or require it server-side, so this login is not a production
-authorization boundary.
+session state and sent as a Bearer token for the real-send request. That
+endpoint is the only core business API route protected by the JWT, so login is
+not a production authorization boundary for the rest of this POC.
 
 Google sign-in is currently local-development-specific: the frontend client ID
 and the frontend/backend callback URLs are hardcoded in the authentication
@@ -249,16 +281,17 @@ directory.
 | Bedrock KB | `BEDROCK_KB_ID`, `BEDROCK_KB_TOP_K` | Used for both email-agent retrievals. |
 | Bedrock chat | `BEDROCK_KB_MODEL_ARN` | Model ID or ARN used by the separate `RetrieveAndGenerate` chatbot flow. |
 | Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_REQUEST_TIMEOUT_SECONDS` | Used by the worker's structured email agent; the 180-second default applies to each Gemini request. |
-| Email worker | `EMAIL_GENERATION_WORKER_POLL_SECONDS`, `EMAIL_GENERATION_HEARTBEAT_SECONDS`, `EMAIL_GENERATION_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. The stale threshold must remain comfortably above the heartbeat interval and expected scheduling jitter. |
+| Generation worker | `EMAIL_GENERATION_WORKER_POLL_SECONDS`, `EMAIL_GENERATION_HEARTBEAT_SECONDS`, `EMAIL_GENERATION_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. The stale threshold must remain comfortably above the heartbeat interval and expected scheduling jitter. |
+| Delivery worker | `EMAIL_DELIVERY_WORKER_POLL_SECONDS`, `EMAIL_DELIVERY_HEARTBEAT_SECONDS`, `EMAIL_DELIVERY_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. Keep the stale threshold comfortably above the heartbeat interval. |
 | EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Configures Bearer-authenticated manual and scheduled feed sync. The reseller/client scope is also part of the derived identity for rows without a source ID. |
 | Daily sync worker | `LEAD_AUTO_SYNC_TIMEZONE`, `LEAD_AUTO_SYNC_POLL_SECONDS`, `LEAD_AUTO_SYNC_HEARTBEAT_SECONDS`, `LEAD_AUTO_SYNC_STALE_SECONDS` | Defaults to `America/Los_Angeles`, 30, 15, and 300 seconds. The timezone must be an IANA name and the stale threshold must exceed the heartbeat interval. |
-| Authentication | `JWT_SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `FRONTEND_URL` | Set a strong local JWT secret before signup. The access-token default is 1,440 minutes and the frontend defaults to `http://localhost:5173`. Authentication currently gates the browser UI only; core business API routes remain unprotected. |
+| Authentication | `JWT_SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `FRONTEND_URL` | Set a strong local JWT secret before signup. The access-token default is 1,440 minutes and the frontend defaults to `http://localhost:5173`. The real-send endpoint requires this JWT; other core business routes remain unprotected. |
 | Google OAuth | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Optional. The current frontend client ID and local callback URLs are also hardcoded in code, so these settings alone do not make Google OAuth portable. |
-| Password reset | `SMTP_HOST`, `SMTP_PORT`, `SMTP_EMAIL`, `SMTP_PASSWORD`, `PASSWORD_RESET_TOKEN_EXPIRE_MINUTES` | Optional unless testing forgot-password email. SMTP defaults to Gmail on port 587 and reset tokens default to 15 minutes. |
+| SMTP | `SMTP_HOST`, `SMTP_PORT`, `SMTP_EMAIL`, `SMTP_PASSWORD`, `SMTP_TIMEOUT_SECONDS`, `PASSWORD_RESET_TOKEN_EXPIRE_MINUTES` | Required to start the delivery worker and optional for password reset. SMTP defaults to Gmail on port 587, the request timeout defaults to 30 seconds, and reset tokens default to 15 minutes. |
 | Frontend | `VITE_API_BASE_URL` | Optional full browser API base; include `/api` unless `API_PREFIX` changes. |
 
 Settings and the configured email agent are process-cached. Restart FastAPI
-and both workers after changing environment values.
+and all three workers after changing environment values.
 
 ## Agent-centric PostgreSQL database
 
@@ -278,6 +311,8 @@ schema. It imports no old records and intentionally has no backfill path:
 - `0005_earlybid_daily_sync` adds durable daily feed runs. Applying it creates
   no run and contacts no provider; the separately started sync worker creates
   only the configured feed's current-day slot.
+- `0006_email_delivery_queue` adds durable outbound delivery jobs. Applying it
+  sends no mail; only the separately started delivery worker contacts SMTP.
 
 PostgreSQL stores identifiers as native `UUID`, flexible source data as
 `JSONB`, timestamps as timezone-aware `TIMESTAMPTZ`, and agent/email lifecycle
@@ -297,8 +332,11 @@ leads 1 ---- * email_generation_jobs
                  `--------------------------------`
                                                   |
                                                   `---- 0..1 emails
+                                                             |---- * email_status_events
                                                              |
-                                                             `---- * email_status_events
+                                                             `---- * email_delivery_jobs
+                                                                        ^
+                                                                        `---- optional retry_of_job_id
 
 earlybid_sync_runs            chat_messages            strategy_documents
 ```
@@ -309,8 +347,9 @@ earlybid_sync_runs            chat_messages            strategy_documents
 | `earlybid_sync_runs` | One durable scheduled run per reseller/client/local schedule date. Status is `queued`, `running`, `retry_wait`, `succeeded`, or `failed`; the row records its UTC schedule, attempt and lease state, safe error code, next retry time, completion time, and final ingestion/generation counts. It stores no feed payload or contact data. |
 | `email_generation_jobs` | Durable requested work for one lead. A job records its trigger, requested input hash, idempotency key, optional retry link, safe error code, attempt count, and queue/claim/heartbeat/completion timestamps. Status is `queued`, `running`, `generated`, `insufficient_context`, `provider_error`, or `system_error`. A unique idempotency key makes request replay safe, and a PostgreSQL partial unique index allows at most one queued/running job per lead. |
 | `agent_runs` | One durable attempt for one lead, with optional `retry_of_run_id` and nullable unique `email_generation_job_id` for worker-created attempts. Status is `running`, `generated`, `insufficient_context`, `provider_error`, or `system_error`. A run stores the curated-input SHA-256 hash, safe selections/warnings/error code, immutable original draft, prompt/catalog versions, model name, aggregate model/retrieval/token counts, latency, and start/completion times. Database checks enforce the SHA-256 shape, nonnegative telemetry, nurturing numbers 1-7, and valid running/generated/failure terminal shapes. |
-| `emails` | At most one mutable review email for a generated run through a unique, non-null `agent_run_id`. It stores unrestricted subject/body text, optional recipient snapshot, review status, and timestamps. `lead_id` in the existing API response is derived through the run instead of duplicated. |
+| `emails` | At most one mutable review email for a generated run through a unique, non-null `agent_run_id`. It stores unrestricted subject/body text, the editable optional recipient snapshot, review status, and timestamps. `lead_id` in the existing API response is derived through the run instead of duplicated. |
 | `email_status_events` | Append-only status history. The generated email starts with a `pending_review` event; later changes store previous/new status, optional actor, and timestamp. Status updates lock the email row so concurrent transitions retain a contiguous audit chain. Same-status requests are no-ops. |
+| `email_delivery_jobs` | Durable outbound work for one approved email. Each job retains the exact confirmed sender, recipient, subject, and body plus idempotency/retry links, stable Message-ID, requester, safe error code, and queue/lease/completion timestamps. Status is `queued`, `running`, `succeeded`, `failed`, or `delivery_unknown`; a partial unique index permits only one queued/running job per email. |
 | `chat_messages` | Existing user/assistant chat history grouped by `session_id`. |
 | `strategy_documents` | Existing S3 document metadata; S3 remains the source of truth for document listing. |
 
@@ -325,10 +364,11 @@ external_id)` constraint. This is an ingestion-only change and requires no
 database migration.
 
 Deleting a lead cascades through its generation jobs, runs, generated emails,
-and status events. Deleting a referenced generation job clears its job retry
-link, while run retry links use `RESTRICT`. Indexes cover active job claiming,
-lead score/archive queries, run lead/status/time and cursor queries, email
-status/time queries, and event history.
+status events, and delivery jobs. Deleting a referenced generation or delivery
+job clears its job retry link, while run retry links use `RESTRICT`. Indexes
+cover active generation/delivery claiming, lead score/archive queries, run
+lead/status/time and cursor queries, email status/time queries, and event
+history.
 
 An `agent_runs` record deliberately does **not** persist its curated/normalized
 input snapshot, routing hints, prompts, retrieval queries or chunks, document
@@ -431,8 +471,9 @@ ID. ORM internals and arbitrary raw feed fields are never added to the prompt.
 | POST | `/api/emails/generate/{lead_id}` | Deprecated compatibility adapter that queues generation |
 | GET | `/api/emails` | List generated review emails |
 | GET | `/api/emails/{email_id}` | Read one email for deep-link compatibility |
-| PATCH | `/api/emails/{email_id}` | Edit mutable subject/body content |
-| POST | `/api/emails/{email_id}/status` | Update review status and append an audit event |
+| PATCH | `/api/emails/{email_id}` | Edit the mutable recipient, subject, or body |
+| POST | `/api/emails/{email_id}/status` | Update review status and append an audit event; clients cannot set `sent` |
+| POST | `/api/emails/{email_id}/send` | JWT-authenticated, idempotent queueing of real SMTP delivery |
 | POST | `/api/documents/upload` | Upload a strategy document to S3 and save metadata |
 | GET | `/api/documents` | List strategy documents from S3 |
 | DELETE | `/api/documents/{doc_id}` | Delete an S3 document and best-effort metadata record |
@@ -472,16 +513,47 @@ overwritten.
 
 The opportunity workspace returns the lead, emails newest first, the current
 email ID, whether that current draft was generated from older lead input, and
-the latest generation job. A newer draft does not delete or mutate prior
-emails; history remains available read-only in the UI. The stored
-`recipient_email` snapshot is returned with each email so a later feed update
-does not make an old draft appear addressed to a different contact.
+the latest generation job and delivery state. A newer draft does not delete or
+mutate prior emails; history remains available read-only in the UI. Generation
+initially snapshots the opportunity's current contact address into
+`recipient_email`. Reviewers can fill or replace that one To address without
+changing the lead, and a later feed update never silently retargets an existing
+draft.
 
 All attempts, including failures, retain durable job/run records; only
 successful generation creates an email. The production endpoints never return
 raw lead data, KB chunks, prompts, or agent telemetry. Human edits update only
 the mutable email, leaving the original generated subject/body on the run
-unchanged. Malformed and nonexistent identifiers return stable 404 responses.
+unchanged. A valid saved recipient and nonblank subject/body are required for
+approval. Editing any of them after approval records a transition back to
+`pending_review`. Historical, rejected, sent, and actively delivering emails
+remain read-only. Malformed and nonexistent identifiers return stable 404
+responses.
+
+### Durable outbound email delivery
+
+`POST /api/emails/{email_id}/send` requires a valid Bearer JWT and a configured
+nonblank JWT secret. It accepts a caller-generated UUID idempotency key, the
+current delivery-content SHA-256 hash, and an optional duplicate-risk
+acknowledgement. It returns HTTP 202 with the existing or newly queued delivery
+summary. The current approved email, its saved recipient/subject/body, and the
+expected hash must still match; FastAPI never contacts SMTP in this request.
+
+Each `email_delivery_jobs` row snapshots the sender, recipient, subject, and
+body that the user confirmed. PostgreSQL locking and a partial unique index
+allow at most one queued/running delivery for an email. Same-key replay for the
+same email returns the original job; reusing that key for another email is a
+conflict. The worker claims with `SKIP LOCKED`, commits and releases locks, and
+then calls SMTP with a stable RFC Message-ID while heartbeating its lease.
+
+SMTP relay acceptance atomically completes the job, marks the review email
+`sent`, and appends the status event. A definite failure records a safe error
+and leaves the email approved for a manual retry. A timeout, disconnect during
+submission, expired lease, or another ambiguous outcome becomes
+`delivery_unknown`; the queue never automatically replays it. Any explicit
+resend while an unknown attempt exists must acknowledge that it could deliver
+a duplicate. Regeneration and editing are blocked while delivery is active,
+and unresolved unknown delivery blocks regeneration.
 
 ### Development-only diagnostics
 
@@ -504,6 +576,9 @@ APIs.
   safe provider outcome.
 - Feed sync and CSV upload only persist leads and jobs; they never instantiate
   or invoke the email agent. Only the worker performs billable generation.
+- The delivery API only persists a job. Only the separately started delivery
+  worker contacts SMTP, and it logs safe identifiers/outcomes rather than the
+  recipient, subject, body, credentials, or raw relay response.
 - The daily sync worker is the only automatic EarlyBid caller. It logs run/feed
   identifiers, attempts, safe error codes, timings, and aggregate counts, never
   CSV rows, contact data, credentials, or upstream response bodies.
@@ -527,21 +602,24 @@ verification.
 python -m compileall -q app agent alembic
 python -m unittest discover -s agent/tests -t . -p "test_*.py"
 python -m unittest tests.test_email_generation_queue -v
+python -m unittest tests.test_email_delivery_queue -v
 python -m unittest tests.test_earlybid_sync_scheduler -v
 python -m unittest discover -s tests -v
 
 # From frontend/
+npm run test:run -- src/features/opportunities/Opportunities.test.tsx src/lib/api.test.ts
 npm run lint
 npm run build
 ```
 
-The offline suites cover new-only automatic queueing, replay-safe manual
-queueing, sync/upload response counts, workspace ordering and staleness,
-provider-free worker outcomes, and the rule that ingestion never invokes a
-provider. Existing ingestion coverage includes explicit-ID precedence,
-deterministic `earlybid-natural-v1` IDs, repeat imports, mutable-field changes,
-scope separation, invalid components, duplicate conflicts, and the upload/sync
-422/502 atomic failure contracts.
+The offline suites cover new-only automatic queueing, replay-safe generation
+and delivery queueing, editable/default recipient behavior, approval and
+content-hash rules, definite/unknown fake SMTP outcomes, workspace ordering
+and staleness, provider-free worker outcomes, and the rule that API handlers
+never perform provider delivery. Existing ingestion coverage includes
+explicit-ID precedence, deterministic `earlybid-natural-v1` IDs, repeat
+imports, mutable-field changes, scope separation, invalid components,
+duplicate conflicts, and the upload/sync 422/502 atomic failure contracts.
 
 Scheduler tests use fixed clocks and fake EarlyBid responses. They cover local
 midnight and daylight-saving boundaries, current-day catch-up, uniqueness,
@@ -559,12 +637,12 @@ whose name ends in `_test`:
 ```powershell
 # From backend/; the local Docker PostgreSQL instance listens on port 5432.
 $env:ACCOYA_TEST_DATABASE_URL="postgresql+psycopg2://postgres:postgres@localhost:5432/ai_marketing_test"
-python -m unittest tests.test_postgres_agent_database -v
+python -m unittest tests.test_postgres_agent_database tests.test_postgres_email_delivery -v
 Remove-Item Env:ACCOYA_TEST_DATABASE_URL
 ```
 
-The suite may create and migrate `accoya_agent_test`, uses a fake agent, and
-cleans only agent-subsystem rows in that isolated test database. Against a
+The suites create or migrate only the configured `_test` database, use fake
+providers, and clean only their application rows there. Against a
 configured local database that is already at head, migration drift can also be
 checked with:
 
@@ -574,22 +652,26 @@ python -m alembic check
 
 ## Known gaps and safety
 
-- The browser has signup/login screens and JWT session state, but the lead,
-  email, document, and chat routes do not enforce that JWT. The API must not be
-  exposed publicly.
+- The real-send endpoint enforces the browser JWT, but the remaining lead,
+  email-review, document, and chat routes do not. The API must not be exposed
+  publicly.
 - Manual/scheduled lead sync and CSV upload persist contact data and
   automatically queue a draft for every newly inserted opportunity. Both
-  workers, document operations, and chat can call billable or mutating external
-  services.
-- Email status changes do not send mail, and `sent` emails are not indexed into
-  the knowledge base.
+  generation/sync workers, document operations, and chat can call billable or
+  mutating external services.
+- Review status changes alone never send mail; the authenticated Send Email
+  action queues a real external message. Starting the delivery worker
+  authorizes live SMTP sends. `sent` means relay acceptance, not inbox delivery,
+  and sent emails are not indexed into the knowledge base.
 - Document upload does not start a Bedrock KB ingestion job.
 - There is no bundled process supervisor, CI workflow, or AWS deployment
-  configuration. FastAPI and both workers must be deployed and supervised as
-  separate processes.
-- Deploy the migration, API, email worker, and sync worker together. Starting
-  the sync worker authorizes live daily EarlyBid calls and downstream draft
-  queueing; do not use it as a health check or automated test.
+  configuration. FastAPI and all three workers must be deployed and supervised
+  as separate processes.
+- Deploy the database migration, API, generation worker, delivery worker, and
+  sync worker together. Starting the delivery worker authorizes queued live
+  SMTP sends; starting the sync worker authorizes live daily EarlyBid calls
+  and downstream draft queueing. Do not use either as a health check or
+  automated test.
 - EarlyBid does not supply an immutable opportunity ID. A project rename or
   location correction therefore produces a new lead identity; reconciliation
   of renamed opportunities is not automated.
