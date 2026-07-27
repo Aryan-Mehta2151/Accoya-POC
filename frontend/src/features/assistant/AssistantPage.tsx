@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -202,23 +203,29 @@ function parseMarkdown(text: string): ReactNode {
 }
 
 type TypewriterTextProps = {
+  messageId: string;
   text: string;
-  onDone?: () => void;
+  onDone?: (messageId: string) => void;
   onTick?: () => void;
 };
 
-function TypewriterText({ text, onDone, onTick }: TypewriterTextProps) {
+function TypewriterText({
+  messageId,
+  text,
+  onDone,
+  onTick,
+}: TypewriterTextProps) {
   /**Reveal text word by word like ChatGPT streaming. */
-  const [wordCount, setWordCount] = useState(0);
   const words = useMemo(() => text.split(/(\s+)/), [text]);
-
-  useEffect(() => {
-    setWordCount(0);
-  }, [text]);
+  const [wordCount, setWordCount] = useState(() =>
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      ? words.length
+      : 0,
+  );
 
   useEffect(() => {
     if (wordCount >= words.length) {
-      onDone?.();
+      onDone?.(messageId);
       return;
     }
     const timer = setTimeout(() => {
@@ -226,7 +233,7 @@ function TypewriterText({ text, onDone, onTick }: TypewriterTextProps) {
       onTick?.();
     }, 40);
     return () => clearTimeout(timer);
-  }, [wordCount, words.length, onDone, onTick]);
+  }, [messageId, onDone, onTick, wordCount, words.length]);
 
   const shown = words.slice(0, wordCount).join("");
   return <>{parseMarkdown(shown)}</>;
@@ -236,7 +243,9 @@ export function AssistantPage() {
   const queryClient = useQueryClient();
   const transcriptRef = useRef<HTMLDivElement>(null);
   const [sessionId, setSessionId] = useState<string | null>(storedSessionId);
-  const [localMessages, setLocalMessages] = useState<ConversationMessage[]>([]);
+  const [localMessages, setLocalMessages] = useState<
+    ConversationMessage[] | null
+  >(() => (storedSessionId() ? null : []));
   const [input, setInput] = useState("");
   const [lastSubmitted, setLastSubmitted] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ sessionId: string } | null>(null);
@@ -262,9 +271,9 @@ export function AssistantPage() {
       })),
     [historyQuery.data],
   );
-  const messages = localMessages.length > 0 ? localMessages : historyMessages;
+  const messages = localMessages ?? historyMessages;
   const isRestoring =
-    Boolean(sessionId) && localMessages.length === 0 && historyQuery.isLoading;
+    Boolean(sessionId) && localMessages === null && historyQuery.isLoading;
 
   const chatMutation = useMutation({
     mutationFn: ({
@@ -278,7 +287,7 @@ export function AssistantPage() {
       setSessionId(response.session_id);
       saveSessionId(response.session_id);
       setLocalMessages((current) => [
-        ...current,
+        ...(current ?? historyMessages),
         {
           id: `assistant-${Date.now()}`,
           role: "assistant",
@@ -315,17 +324,18 @@ export function AssistantPage() {
     });
   }, [messages, chatMutation.isPending]);
 
-  const markMessageDone = (id: string) => {
+  const markMessageDone = useCallback((id: string) => {
     setLocalMessages((current) =>
-      current.map((m) => (m.id === id ? { ...m, isNew: false } : m)),
+      current?.map((m) => (m.id === id ? { ...m, isNew: false } : m)) ??
+      current,
     );
-  };
+  }, []);
 
-  const scrollToBottom = () => {
+  const scrollToBottom = useCallback(() => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
     transcript.scrollTop = transcript.scrollHeight;
-  };
+  }, []);
 
   const submitMessage = (text: string, appendUser = true) => {
     const trimmed = text.trim();
@@ -335,7 +345,7 @@ export function AssistantPage() {
     setLastSubmitted(trimmed);
     if (appendUser) {
       setLocalMessages((current) => [
-        ...(current.length > 0 ? current : historyMessages),
+        ...(current ?? historyMessages),
         {
           id: `user-${Date.now()}`,
           role: "user",
@@ -382,7 +392,7 @@ export function AssistantPage() {
   const switchToSession = (id: string) => {
     if (id === sessionId) return;
     chatMutation.reset();
-    setLocalMessages([]);
+    setLocalMessages(null);
     setInput("");
     setLastSubmitted(null);
     setSessionId(id);
@@ -425,6 +435,7 @@ export function AssistantPage() {
               className={styles.newChatButton}
               type="button"
               title="New conversation"
+              aria-label="Start new conversation"
               onClick={startNewConversation}
               disabled={chatMutation.isPending || (!sessionId && !hasMessages)}
             >
@@ -566,8 +577,10 @@ export function AssistantPage() {
                     <div className={styles.messageContent}>
                       {message.role === "assistant" && message.isNew ? (
                         <TypewriterText
+                          key={message.id}
+                          messageId={message.id}
                           text={message.content}
-                          onDone={() => markMessageDone(message.id)}
+                          onDone={markMessageDone}
                           onTick={scrollToBottom}
                         />
                       ) : (

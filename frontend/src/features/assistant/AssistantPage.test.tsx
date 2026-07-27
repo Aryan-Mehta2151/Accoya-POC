@@ -17,7 +17,9 @@ vi.mock("../../lib/api", () => {
     ApiError: MockApiError,
     api: {
       chat: vi.fn(),
+      deleteChat: vi.fn(),
       getChatHistory: vi.fn(),
+      listChatSessions: vi.fn(),
     },
   };
 });
@@ -52,6 +54,11 @@ beforeEach(() => {
     value: vi.fn(),
   });
   vi.mocked(api.getChatHistory).mockResolvedValue([]);
+  vi.mocked(api.listChatSessions).mockResolvedValue([]);
+  vi.mocked(api.deleteChat).mockResolvedValue({
+    deleted: true,
+    session_id: "deleted-session",
+  });
 });
 
 afterEach(() => cleanup());
@@ -127,7 +134,7 @@ describe("AssistantPage", () => {
     expect(api.chat).toHaveBeenCalledTimes(2);
   });
 
-  it("starts a clean conversation and removes the stored session", async () => {
+  it("starts a clean conversation and sends its first question without the old session", async () => {
     window.sessionStorage.setItem(
       "accoya-outreach-assistant-session",
       "saved-session",
@@ -143,5 +150,81 @@ describe("AssistantPage", () => {
     expect(screen.queryByText("An earlier answer.")).not.toBeInTheDocument();
     expect(screen.getByText("What would you like to understand?")).toBeInTheDocument();
     expect(window.sessionStorage.getItem("accoya-outreach-assistant-session")).toBeNull();
+
+    vi.mocked(api.chat).mockResolvedValue({
+      session_id: "replacement-session",
+      answer: "A clean answer.",
+      sources: [],
+    });
+    await user.type(
+      screen.getByRole("textbox", { name: "Ask the knowledge assistant" }),
+      "Start fresh{Enter}",
+    );
+
+    expect(api.chat).toHaveBeenCalledWith("Start fresh", null);
+    expect(window.sessionStorage.getItem("accoya-outreach-assistant-session")).toBe(
+      "replacement-session",
+    );
+  });
+
+  it("keeps a new conversation empty when the old history request finishes late", async () => {
+    window.sessionStorage.setItem(
+      "accoya-outreach-assistant-session",
+      "slow-session",
+    );
+    let resolveHistory!: (messages: Array<{
+      role: "user" | "assistant";
+      content: string;
+    }>) => void;
+    vi.mocked(api.getChatHistory).mockReturnValue(
+      new Promise((resolve) => {
+        resolveHistory = resolve;
+      }),
+    );
+    const { user } = renderPage();
+
+    await user.click(
+      screen.getByRole("button", { name: "Start new conversation" }),
+    );
+    expect(screen.getByText("What would you like to understand?")).toBeInTheDocument();
+
+    resolveHistory([{ role: "assistant", content: "A late old answer." }]);
+
+    expect(await screen.findByText("What would you like to understand?")).toBeInTheDocument();
+    expect(screen.queryByText("A late old answer.")).not.toBeInTheDocument();
+  });
+
+  it("switches between saved conversations without mixing transcripts", async () => {
+    window.sessionStorage.setItem(
+      "accoya-outreach-assistant-session",
+      "first-session",
+    );
+    vi.mocked(api.listChatSessions).mockResolvedValue([
+      {
+        session_id: "first-session",
+        message_count: 2,
+        last_message_at: "2026-07-27T12:00:00Z",
+      },
+      {
+        session_id: "second-session",
+        message_count: 2,
+        last_message_at: "2026-07-26T12:00:00Z",
+      },
+    ]);
+    vi.mocked(api.getChatHistory).mockImplementation(async (sessionId) =>
+      sessionId === "first-session"
+        ? [{ role: "assistant", content: "First transcript." }]
+        : [{ role: "assistant", content: "Second transcript." }],
+    );
+    const { user } = renderPage();
+
+    expect(await screen.findByText("First transcript.")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: /Chat 2/ }));
+
+    expect(await screen.findByText("Second transcript.")).toBeInTheDocument();
+    expect(screen.queryByText("First transcript.")).not.toBeInTheDocument();
+    expect(window.sessionStorage.getItem("accoya-outreach-assistant-session")).toBe(
+      "second-session",
+    );
   });
 });
