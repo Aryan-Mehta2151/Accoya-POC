@@ -204,6 +204,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await authApi.forgotPassword(email);
   }, []);
 
+  const requestAccess = useCallback(async (email: string, name?: string) => {
+    const response = await authApi.requestAccess(email, name);
+    return response.message;
+  }, []);
+
   const resetPassword = useCallback(async (token: string, password: string) => {
     await authApi.resetPassword(token, password);
     clearSession(true);
@@ -218,6 +223,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     status,
     loading: status === 'checking',
     login,
+    requestAccess,
     logout,
     forgotPassword,
     resetPassword,
@@ -229,6 +235,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     announceSessionChanged,
     login,
     logout,
+    requestAccess,
     resetPassword,
     startGoogleLogin,
     status,

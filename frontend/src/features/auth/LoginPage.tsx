@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
-import { Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import styles from './auth.module.css';
 
@@ -138,7 +138,12 @@ export function LoginPage() {
         </button>
 
         <div className={styles.toggle}>
-          <p>Accounts are managed by your Accoya administrator.</p>
+          <p>
+            Need an account?
+            <Link to='/request-access' className={styles.toggleButton}>
+              Request access
+            </Link>
+          </p>
         </div>
       </div>
     </div>

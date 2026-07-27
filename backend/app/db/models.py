@@ -89,6 +89,13 @@ class EarlyBidSyncRunStatus(str, enum.Enum):
     failed = "failed"
 
 
+class AccessRequestStatus(str, enum.Enum):
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
+    expired = "expired"
+
+
 _EMAIL_STATUS = Enum(EmailStatus, name="email_status")
 _AGENT_RUN_STATUS = Enum(AgentRunStatus, name="agent_run_status")
 _EMAIL_GENERATION_JOB_STATUS = Enum(
@@ -106,6 +113,10 @@ _EMAIL_DELIVERY_JOB_STATUS = Enum(
 _EARLYBID_SYNC_RUN_STATUS = Enum(
     EarlyBidSyncRunStatus,
     name="earlybid_sync_run_status",
+)
+_ACCESS_REQUEST_STATUS = Enum(
+    AccessRequestStatus,
+    name="access_request_status",
 )
 
 
@@ -894,6 +905,83 @@ class User(Base):
             func.lower(email),
             unique=True,
         ),
+    )
+
+
+class AccessRequest(Base):
+    """Pending sign-in request that requires explicit approval."""
+
+    __tablename__ = "access_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(email)) > 0 AND email = lower(trim(email))",
+            name="ck_access_requests_email_normalized",
+        ),
+        CheckConstraint(
+            "token_hash IS NULL OR length(token_hash) = 64",
+            name="ck_access_requests_token_hash_sha256",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND token_hash IS NOT NULL "
+            "AND expires_at IS NOT NULL AND reviewed_at IS NULL "
+            "AND reviewed_by IS NULL) OR "
+            "(status IN ('approved', 'rejected', 'expired') "
+            "AND token_hash IS NULL AND expires_at IS NULL "
+            "AND reviewed_at IS NOT NULL AND reviewed_by IS NOT NULL)",
+            name="ck_access_requests_status_shape",
+        ),
+        UniqueConstraint(
+            "token_hash",
+            name="uq_access_requests_token_hash",
+        ),
+        Index(
+            "uq_access_requests_pending_email",
+            "email",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+        Index(
+            "ix_access_requests_status_requested_at",
+            "status",
+            "requested_at",
+        ),
+        Index(
+            "ix_access_requests_email_requested_at",
+            "email",
+            "requested_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[AccessRequestStatus] = mapped_column(
+        _ACCESS_REQUEST_STATUS,
+        nullable=False,
+        default=AccessRequestStatus.pending,
+        server_default=AccessRequestStatus.pending.value,
+    )
+    token_hash: Mapped[str | None] = mapped_column(String(64))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_user_id: Mapped[str | None] = mapped_column(_UUID)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
 

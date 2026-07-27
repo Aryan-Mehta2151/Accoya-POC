@@ -12,6 +12,7 @@ export interface AuthContextValue {
   status: AuthStatus;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
+  requestAccess: (email: string, name?: string) => Promise<string>;
   logout: () => Promise<void>;
   forgotPassword: (email: string) => Promise<void>;
   resetPassword: (token: string, password: string) => Promise<void>;

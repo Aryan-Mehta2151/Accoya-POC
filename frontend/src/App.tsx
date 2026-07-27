@@ -16,6 +16,7 @@ import {
   CallbackPage, 
   ForgotPasswordPage, 
   LoginPage, 
+  RequestAccessPage,
   ResetPasswordPage 
 } from './features/auth';
 import { useAuth } from './hooks/useAuth';
@@ -63,6 +64,10 @@ const router = createBrowserRouter([
   {
     path: '/forgot-password',
     element: <ForgotPasswordPage />,
+  },
+  {
+    path: '/request-access',
+    element: <RequestAccessPage />,
   },
   {
     path: '/reset-password',

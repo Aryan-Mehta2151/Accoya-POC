@@ -233,7 +233,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.selected_product_family, "accoya_wood")
         self.assertEqual(result.selected_application, "standard_decking")
 
-    def test_low_below_threshold_and_invalid_catalog_stop_before_retrieval(self):
+    def test_low_below_threshold_and_invalid_catalog_generate_best_effort(self):
         cases = (
             low_selection(),
             selection(confidence=0.59),
@@ -242,16 +242,19 @@ class WorkflowTests(unittest.TestCase):
         )
         for proposed in cases:
             with self.subTest(selection=proposed.model_dump()):
-                model = FakeStructuredModel([(ProductSelection, proposed)])
+                model = FakeStructuredModel([
+                    (ProductSelection, proposed),
+                    (EmailDraft, draft()),
+                ])
                 retriever = FakeRetriever([chunk()])
                 result = make_agent(model, retriever).generate(lead_record())
-                self.assertEqual(
-                    result.status, GenerationStatus.INSUFFICIENT_CONTEXT
-                )
+                self.assertEqual(result.status, GenerationStatus.GENERATED)
                 self.assertEqual(retriever.calls, [])
-                self.assertEqual(len(model.calls), 1)
-                self.assertIsNone(result.nurturing_email_number)
+                self.assertEqual(len(model.calls), 2)
                 self.assertEqual(result.telemetry.retrieval_count, 0)
+                self.assertTrue(
+                    any("limited_context_best_effort" in item for item in result.warnings)
+                )
 
     def test_missing_empty_or_failed_retrieval_still_generates(self):
         scenarios = (

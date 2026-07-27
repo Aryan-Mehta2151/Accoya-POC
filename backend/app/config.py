@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
 
+from pydantic import EmailStr
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
@@ -88,6 +89,9 @@ class Settings(BaseSettings):
     jwt_audience: str = "accoya-web"
     auth_cookie_secure: bool = False
     password_reset_token_expire_minutes: int = 15
+    access_request_token_expire_minutes: int = 1440
+    access_request_cooldown_minutes: int = 15
+    access_request_approver_email: EmailStr = "aryanmehta2151@gmail.com"
 
     # SMTP
     smtp_host: str = "smtp.gmail.com"

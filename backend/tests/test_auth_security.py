@@ -27,7 +27,7 @@ from app.api.routes import auth
 from app.auth import admin
 from app.config import Settings, get_settings
 from app.db.database import Base, get_db
-from app.db.models import PasswordResetToken, User
+from app.db.models import AccessRequest, AccessRequestStatus, PasswordResetToken, User
 from app.services.auth_security import (
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
@@ -59,6 +59,9 @@ class AuthApiTests(unittest.TestCase):
                 "JWT_AUDIENCE": "accoya-web",
                 "AUTH_COOKIE_SECURE": "false",
                 "FRONTEND_URL": "http://localhost:5173",
+                "ACCESS_REQUEST_APPROVER_EMAIL": "aryanmehta2151@gmail.com",
+                "ACCESS_REQUEST_TOKEN_EXPIRE_MINUTES": "1440",
+                "ACCESS_REQUEST_COOLDOWN_MINUTES": "15",
                 "GOOGLE_CLIENT_ID": "test-client",
                 "GOOGLE_CLIENT_SECRET": "test-secret",
                 "GOOGLE_REDIRECT_URI": (
@@ -423,6 +426,301 @@ class AuthApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(smtp_transaction_states, [False])
 
+    def test_request_access_requires_csrf_and_sends_approver_email(self) -> None:
+        missing = self.client.post(
+            "/api/auth/request-access",
+            json={"email": "new.user@example.com", "name": "New User"},
+        )
+        self.assertEqual(missing.status_code, 403)
+
+        csrf = self._csrf()
+        captured: dict[str, str] = {}
+
+        def _capture_review_email(**kwargs) -> bool:
+            captured.update({k: str(v) for k, v in kwargs.items()})
+            return True
+
+        with patch.object(
+            auth,
+            "send_access_request_review_email",
+            side_effect=_capture_review_email,
+        ):
+            response = self.client.post(
+                "/api/auth/request-access",
+                headers={CSRF_HEADER_NAME: csrf},
+                json={"email": " NEW.USER@Example.com ", "name": " New User "},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["message"],
+            "If access can be granted, the request will be reviewed shortly.",
+        )
+        self.assertEqual(captured["approver_email"], "aryanmehta2151@gmail.com")
+        self.assertEqual(captured["requester_email"], "new.user@example.com")
+        self.assertIn("decision=approve", captured["approve_link"])
+        self.assertIn("decision=reject", captured["reject_link"])
+
+        with self.sessions() as db:
+            record = db.scalar(select(AccessRequest))
+            self.assertIsNotNone(record)
+            self.assertEqual(record.email, "new.user@example.com")
+            self.assertEqual(record.status, AccessRequestStatus.pending)
+            self.assertEqual(len(record.token_hash), 64)
+
+    def test_request_access_resubmission_rotates_pending_token(self) -> None:
+        csrf = self._csrf()
+        first_email_call_count = 0
+
+        def _send_review_email(**_kwargs) -> bool:
+            nonlocal first_email_call_count
+            first_email_call_count += 1
+            return True
+
+        with patch.object(
+            auth,
+            "send_access_request_review_email",
+            side_effect=_send_review_email,
+        ):
+            first = self.client.post(
+                "/api/auth/request-access",
+                headers={CSRF_HEADER_NAME: csrf},
+                json={"email": "repeat@example.com", "name": "First"},
+            )
+            self.assertEqual(first.status_code, 200)
+
+        with self.sessions() as db:
+            original = db.scalar(select(AccessRequest))
+            first_hash = original.token_hash
+            original.requested_at = datetime.now(timezone.utc) - timedelta(minutes=20)
+            db.commit()
+
+        with patch.object(
+            auth,
+            "send_access_request_review_email",
+            side_effect=_send_review_email,
+        ):
+            second = self.client.post(
+                "/api/auth/request-access",
+                headers={CSRF_HEADER_NAME: csrf},
+                json={"email": "repeat@example.com", "name": "Second"},
+            )
+            self.assertEqual(second.status_code, 200)
+
+        with self.sessions() as db:
+            rows = db.scalars(select(AccessRequest)).all()
+            self.assertEqual(len(rows), 1)
+            self.assertNotEqual(rows[0].token_hash, first_hash)
+            self.assertEqual(rows[0].name, "Second")
+        self.assertEqual(first_email_call_count, 2)
+
+    def test_request_access_resubmission_within_cooldown_is_blocked(self) -> None:
+        csrf = self._csrf()
+
+        with patch.object(
+            auth,
+            "send_access_request_review_email",
+            return_value=True,
+        ) as send_review:
+            first = self.client.post(
+                "/api/auth/request-access",
+                headers={CSRF_HEADER_NAME: csrf},
+                json={"email": "cooldown@example.com", "name": "First"},
+            )
+            self.assertEqual(first.status_code, 200)
+
+            with self.sessions() as db:
+                original = db.scalar(
+                    select(AccessRequest).where(
+                        AccessRequest.email == "cooldown@example.com"
+                    )
+                )
+                first_hash = original.token_hash
+
+            second = self.client.post(
+                "/api/auth/request-access",
+                headers={CSRF_HEADER_NAME: csrf},
+                json={"email": "cooldown@example.com", "name": "Second"},
+            )
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(
+            second.json()["message"],
+            "A request was already submitted recently. Please wait before trying again.",
+        )
+        self.assertEqual(send_review.call_count, 1)
+
+        with self.sessions() as db:
+            current = db.scalar(
+                select(AccessRequest).where(
+                    AccessRequest.email == "cooldown@example.com"
+                )
+            )
+            self.assertEqual(current.name, "First")
+            self.assertEqual(current.token_hash, first_hash)
+
+    def test_request_access_returns_already_has_access_for_active_user(self) -> None:
+        self._create_user(email="already.active@example.com", active=True)
+        csrf = self._csrf()
+
+        with patch.object(
+            auth,
+            "send_access_request_review_email",
+            return_value=True,
+        ) as send_review:
+            response = self.client.post(
+                "/api/auth/request-access",
+                headers={CSRF_HEADER_NAME: csrf},
+                json={"email": "already.active@example.com", "name": "Existing User"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["message"],
+            "This email already has access. Please sign in or use Forgot Password.",
+        )
+        send_review.assert_not_called()
+
+        with self.sessions() as db:
+            pending = db.scalars(
+                select(AccessRequest).where(
+                    AccessRequest.email == "already.active@example.com"
+                )
+            ).all()
+            self.assertEqual(pending, [])
+
+    def test_review_access_request_approve_creates_active_user_and_reset_token(self) -> None:
+        csrf = self._csrf()
+        links: dict[str, str] = {}
+
+        def _capture_review_email(**kwargs) -> bool:
+            links["approve"] = kwargs["approve_link"]
+            return True
+
+        with patch.object(
+            auth,
+            "send_access_request_review_email",
+            side_effect=_capture_review_email,
+        ):
+            requested = self.client.post(
+                "/api/auth/request-access",
+                headers={CSRF_HEADER_NAME: csrf},
+                json={"email": "approved.request@example.com", "name": "Requester"},
+            )
+        self.assertEqual(requested.status_code, 200)
+
+        decision_calls: list[dict[str, str]] = []
+
+        def _capture_decision_email(**kwargs) -> bool:
+            decision_calls.append({k: str(v) for k, v in kwargs.items()})
+            return True
+
+        with patch.object(
+            auth,
+            "send_access_request_decision_email",
+            side_effect=_capture_decision_email,
+        ):
+            review = self.client.get(links["approve"])
+
+        self.assertEqual(review.status_code, 200)
+        self.assertIn("Access Request Approved", review.text)
+        self.assertIn("password setup email has been sent", review.text)
+        self.assertEqual(len(decision_calls), 1)
+        self.assertEqual(decision_calls[0]["approved"], "True")
+        self.assertIn("reset-password#token=", decision_calls[0]["reset_link"])
+
+        with self.sessions() as db:
+            user = db.scalar(
+                select(User).where(User.email == "approved.request@example.com")
+            )
+            self.assertIsNotNone(user)
+            self.assertTrue(user.is_active)
+            request_record = db.scalar(
+                select(AccessRequest).where(
+                    AccessRequest.email == "approved.request@example.com"
+                )
+            )
+            self.assertEqual(request_record.status, AccessRequestStatus.approved)
+            self.assertIsNone(request_record.token_hash)
+            reset = db.scalar(
+                select(PasswordResetToken).where(PasswordResetToken.user_id == user.id)
+            )
+            self.assertIsNotNone(reset)
+
+    def test_review_access_request_reject_marks_terminal_state(self) -> None:
+        csrf = self._csrf()
+        links: dict[str, str] = {}
+
+        def _capture_review_email(**kwargs) -> bool:
+            links["reject"] = kwargs["reject_link"]
+            return True
+
+        with patch.object(
+            auth,
+            "send_access_request_review_email",
+            side_effect=_capture_review_email,
+        ):
+            requested = self.client.post(
+                "/api/auth/request-access",
+                headers={CSRF_HEADER_NAME: csrf},
+                json={"email": "reject.request@example.com"},
+            )
+        self.assertEqual(requested.status_code, 200)
+
+        with patch.object(
+            auth,
+            "send_access_request_decision_email",
+            return_value=True,
+        ):
+            review = self.client.get(links["reject"])
+        self.assertEqual(review.status_code, 200)
+        self.assertIn("Access Request Rejected", review.text)
+        self.assertIn("No account changes were applied", review.text)
+
+        with self.sessions() as db:
+            request_record = db.scalar(
+                select(AccessRequest).where(
+                    AccessRequest.email == "reject.request@example.com"
+                )
+            )
+            self.assertEqual(request_record.status, AccessRequestStatus.rejected)
+            self.assertIsNone(request_record.token_hash)
+            user = db.scalar(
+                select(User).where(User.email == "reject.request@example.com")
+            )
+            self.assertIsNone(user)
+
+    def test_review_access_request_fails_after_expiry(self) -> None:
+        with self.sessions.begin() as db:
+            db.add(
+                AccessRequest(
+                    email="expired.request@example.com",
+                    status=AccessRequestStatus.pending,
+                    token_hash=hash_password_reset_token("x" * 32),
+                    expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+                    requested_at=datetime.now(timezone.utc),
+                )
+            )
+
+        response = self.client.get(
+            "/api/auth/access-requests/review",
+            params={"token": "x" * 32, "decision": "approve"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "invalid_access_request_token",
+        )
+
+        with self.sessions() as db:
+            request_record = db.scalar(
+                select(AccessRequest).where(
+                    AccessRequest.email == "expired.request@example.com"
+                )
+            )
+            self.assertEqual(request_record.status, AccessRequestStatus.expired)
+            self.assertIsNone(request_record.token_hash)
+
     def test_logout_requires_csrf_clears_cookies_and_revokes_old_token(self) -> None:
         user = self._create_user()
         logged_in = self._login()
@@ -510,11 +808,16 @@ class AuthApiTests(unittest.TestCase):
                 ),
             ),
         ):
-            self.client.get(
+            callback = self.client.get(
                 "/api/auth/callback/google",
                 params={"code": "code", "state": state},
                 follow_redirects=False,
             )
+        self.assertEqual(callback.status_code, 302)
+        self.assertEqual(
+            callback.headers["location"],
+            "http://localhost:5173/auth/callback?error=access_not_approved",
+        )
         with self.sessions() as db:
             self.assertIsNone(
                 db.scalar(select(User).where(User.email == "not-approved@example.com"))

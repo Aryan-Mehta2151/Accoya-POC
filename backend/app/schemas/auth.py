@@ -31,6 +31,21 @@ class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
 
+class AccessRequestCreate(BaseModel):
+    """Public request to join the approved user list."""
+
+    email: EmailStr
+    name: str | None = Field(default=None, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+
 class ResetPasswordRequest(BaseModel):
     """One-time password reset request."""
 

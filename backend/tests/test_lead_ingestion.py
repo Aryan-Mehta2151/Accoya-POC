@@ -15,7 +15,15 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.routes import leads
 from app.db.database import Base, get_db
-from app.db.models import EmailGenerationJob, EmailGenerationTrigger, Lead
+from app.db.models import (
+    AgentRun,
+    AgentRunStatus,
+    Email,
+    EmailGenerationJob,
+    EmailGenerationTrigger,
+    EmailStatus,
+    Lead,
+)
 from app.schemas.lead import LeadRead
 from app.services import (
     email_generation_service,
@@ -506,6 +514,62 @@ class LeadIngestionApiTests(unittest.TestCase):
         agent_factory.assert_not_called()
         self.assertEqual(self._lead_count(), 1)
         self.assertEqual(self._job_count(), 1)
+
+    def test_restored_archived_lead_behaves_like_first_time_pull(self):
+        csv_text = (
+            "Project,Location,State,Score\n"
+            "Fresh Again Opportunity,Portland,OR,8\n"
+        )
+        first = self.client.post(
+            "/api/leads/upload-csv",
+            files={"file": ("first.csv", csv_text, "text/csv")},
+        )
+        self.assertEqual(first.status_code, 200)
+        lead_id = first.json()["items"][0]["id"]
+
+        with self.session_factory() as db:
+            run = AgentRun(
+                lead_id=lead_id,
+                status=AgentRunStatus.running,
+                input_hash="a" * 64,
+                prompt_version="test-v1",
+                catalog_version="test-v1",
+                model_name="test-model",
+            )
+            db.add(run)
+            db.flush()
+            db.add(
+                Email(
+                    agent_run_id=run.id,
+                    recipient_email="approver@example.test",
+                    subject="Reviewed draft",
+                    body="Body",
+                    status=EmailStatus.approved,
+                )
+            )
+            db.commit()
+
+        before_delete = self.client.get("/api/leads")
+        self.assertEqual(before_delete.status_code, 200)
+        self.assertEqual(before_delete.json()[0]["current_email"]["status"], "approved")
+
+        deleted = self.client.delete(f"/api/leads/{lead_id}")
+        self.assertEqual(deleted.status_code, 200)
+
+        restored = self.client.post(
+            "/api/leads/upload-csv",
+            files={"file": ("restored.csv", csv_text, "text/csv")},
+        )
+        self.assertEqual(restored.status_code, 200)
+        self.assertEqual(restored.json()["created"], 1)
+        self.assertEqual(restored.json()["updated"], 0)
+        self.assertEqual(restored.json()["generation_queued"], 1)
+
+        after_restore = self.client.get("/api/leads")
+        self.assertEqual(after_restore.status_code, 200)
+        self.assertEqual(len(after_restore.json()), 1)
+        self.assertEqual(after_restore.json()[0]["id"], lead_id)
+        self.assertIsNone(after_restore.json()[0]["current_email"])
 
 
 class LeadWireCompatibilityTests(unittest.TestCase):

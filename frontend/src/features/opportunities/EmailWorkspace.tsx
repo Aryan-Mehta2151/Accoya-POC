@@ -50,6 +50,8 @@ const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
   minute: '2-digit',
 });
 
+const LOW_CONTEXT_WARNING_CODE = 'limited_context_best_effort';
+
 function formatDateTime(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? 'Date unavailable' : dateTimeFormatter.format(date);
@@ -396,6 +398,14 @@ export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
   const generationFailure = workspace.latest_generation && isGenerationFailure(workspace.latest_generation.status)
     ? workspace.latest_generation
     : null;
+  const lowContextDraftWarning = Boolean(
+    selectedEmail
+    && workspace.latest_generation?.error_code === LOW_CONTEXT_WARNING_CODE,
+  );
+  const showTopGenerationFailure = Boolean(
+    generationFailure
+    && !(lowContextDraftWarning && generationFailure.status === 'insufficient_context'),
+  );
   const isHistorical = Boolean(selectedEmail && selectedEmail.id !== workspace.current_email_id);
   const newDraftReadyId = isDirty && selectedEmail && workspace.current_email_id !== selectedEmail.id
     ? workspace.current_email_id
@@ -470,7 +480,7 @@ export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
         </div>
       ) : null}
 
-      {generationFailure ? (
+      {showTopGenerationFailure && generationFailure ? (
         <div className={styles.generationState} data-status='failed' role='alert'>
           <span className={styles.generationStateIcon} aria-hidden='true'><RotateCcw size={19} /></span>
           <div>
@@ -576,6 +586,16 @@ export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
                 <StatusBadge status={selectedEmail.status} />
               )}
             </div>
+
+            {lowContextDraftWarning ? (
+              <div className={styles.lowContextNotice} role='status'>
+                <AlertTriangle aria-hidden='true' size={16} />
+                <p>
+                  Draft quality notice: this email was generated with limited opportunity context.
+                  Review and tailor it before approval/sending.
+                </p>
+              </div>
+            ) : null}
 
             <form
               className={outreachStyles.editorForm}

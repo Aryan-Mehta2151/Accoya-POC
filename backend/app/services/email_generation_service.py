@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from agent.catalog import CATALOG_VERSION
 from agent.models import GenerationResult, GenerationStatus
+from agent.workflow import LOW_CONTEXT_WARNING_CODE
 from agent.prompts import PROMPT_VERSION
 from app.config import get_settings
 from app.db.models import (
@@ -152,7 +153,12 @@ def enqueue_generation(
         return existing
 
     lead = db.scalar(
-        select(Lead).where(Lead.id == canonical_lead_id).with_for_update()
+        select(Lead)
+        .where(
+            Lead.id == canonical_lead_id,
+            Lead.archived_at.is_(None),
+        )
+        .with_for_update()
     )
     if lead is None:
         raise LeadNotFoundError(lead_id)
@@ -275,6 +281,54 @@ def current_email_for_lead(db: Session, lead_id: str) -> Email | None:
         .order_by(Email.created_at.desc(), Email.id.desc())
         .limit(1)
     )
+
+
+def ensure_low_context_fallback_email(db: Session, lead_id: str) -> bool:
+    """Backfill one fallback draft for legacy insufficient-context runs.
+
+    Older runs may have terminal insufficient-context status without a persisted
+    draft. This helper creates a single pending-review fallback email so the UI
+    can always open a draft workspace.
+    """
+
+    latest = _latest_job(db, lead_id)
+    if latest is None or latest.status is not EmailGenerationJobStatus.insufficient_context:
+        return False
+    if latest.agent_run is None:
+        return False
+
+    existing_email = db.scalar(
+        select(Email.id)
+        .where(Email.agent_run_id == latest.agent_run.id)
+        .limit(1)
+    )
+    if existing_email is not None:
+        return False
+
+    lead = db.get(Lead, lead_id)
+    subject, body = _fallback_draft_for_low_context(lead)
+    email_id = str(uuid.uuid4())
+    db.add(
+        Email(
+            id=email_id,
+            agent_run_id=latest.agent_run.id,
+            recipient_email=lead.contact_email if lead is not None else None,
+            subject=subject,
+            body=body,
+            status=EmailStatus.pending_review,
+        )
+    )
+    db.add(
+        EmailStatusEvent(
+            id=str(uuid.uuid4()),
+            email_id=email_id,
+            previous_status=None,
+            new_status=EmailStatus.pending_review,
+            actor=None,
+        )
+    )
+    db.commit()
+    return True
 
 
 def current_email_is_stale(lead: Lead, email: Email | None) -> bool:
@@ -520,6 +574,20 @@ def _finalize_result(
     now = _utc_now()
     telemetry = result.telemetry
     token_usage = telemetry.token_usage
+    draft_subject: str | None = None
+    draft_body: str | None = None
+
+    if status is EmailGenerationJobStatus.generated:
+        draft_subject = result.subject
+        draft_body = result.body
+    elif status is EmailGenerationJobStatus.insufficient_context:
+        lead = run.lead or db.get(Lead, claim.lead_id)
+        draft_subject, draft_body = _fallback_draft_for_low_context(lead)
+
+    low_context_best_effort = any(
+        isinstance(warning, str) and warning.startswith(LOW_CONTEXT_WARNING_CODE)
+        for warning in result.warnings
+    )
 
     run.status = AgentRunStatus(status.value)
     run.selected_product_family = result.selected_product_family
@@ -528,7 +596,9 @@ def _finalize_result(
     run.nurturing_email_theme = result.nurturing_email_theme
     run.warnings = list(result.warnings)
     run.error_code = (
-        None if status is EmailGenerationJobStatus.generated else status.value
+        LOW_CONTEXT_WARNING_CODE
+        if status is EmailGenerationJobStatus.generated and low_context_best_effort
+        else (None if status is EmailGenerationJobStatus.generated else status.value)
     )
     run.original_subject = result.subject
     run.original_body = result.body
@@ -545,19 +615,24 @@ def _finalize_result(
 
     job.status = status
     job.error_code = (
-        None if status is EmailGenerationJobStatus.generated else status.value
+        LOW_CONTEXT_WARNING_CODE
+        if status is EmailGenerationJobStatus.generated and low_context_best_effort
+        else (None if status is EmailGenerationJobStatus.generated else status.value)
     )
     job.completed_at = now
 
-    if status is EmailGenerationJobStatus.generated:
+    if status in (
+        EmailGenerationJobStatus.generated,
+        EmailGenerationJobStatus.insufficient_context,
+    ):
         email_id = str(uuid.uuid4())
         db.add(
             Email(
                 id=email_id,
                 agent_run_id=run.id,
                 recipient_email=claim.recipient_email,
-                subject=result.subject,
-                body=result.body,
+                subject=draft_subject,
+                body=draft_body,
                 status=EmailStatus.pending_review,
             )
         )
@@ -663,6 +738,28 @@ def _result_status(result: GenerationResult) -> EmailGenerationJobStatus:
     raise ValueError("Unsupported agent result status")
 
 
+def _fallback_draft_for_low_context(lead: Lead | None) -> tuple[str, str]:
+    project = (lead.project if lead is not None else None) or "your project"
+    location = ", ".join(
+        value for value in (
+            lead.location if lead is not None else None,
+            lead.state if lead is not None else None,
+        )
+        if value
+    )
+    place = location or "your area"
+    subject = f"Quick Accoya check-in for {project}"
+    body = (
+        f"Hi,\n\n"
+        f"I wanted to quickly reach out about {project} in {place}. "
+        "Accoya could be a strong fit depending on your material and performance goals.\n\n"
+        "If useful, I can share a short, tailored recommendation once we have a bit more project detail "
+        "(application, timing, and decision criteria).\n\n"
+        "Best regards,"
+    )
+    return subject, body
+
+
 def _invoke_agent(
     agent: EmailAgent,
     curated_input: dict[str, Any],
@@ -740,6 +837,7 @@ __all__ = [
     "claim_next_job",
     "current_email_for_lead",
     "current_email_is_stale",
+    "ensure_low_context_fallback_email",
     "emails_for_lead",
     "enqueue_generation",
     "enqueue_initial_generations",

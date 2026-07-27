@@ -30,6 +30,7 @@ vi.mock('../../lib/api', async (importOriginal) => {
       getLeadSyncStatus: vi.fn(),
       syncLeads: vi.fn(),
       uploadLeadsCsv: vi.fn(),
+      deleteLead: vi.fn(),
       getLeadWorkspace: vi.fn(),
       queueEmailGeneration: vi.fn(),
       editEmail: vi.fn(),
@@ -210,6 +211,7 @@ beforeEach(() => {
     total: 1,
     generation_queued: 1,
   });
+  vi.mocked(api.deleteLead).mockResolvedValue({ id: 'lead-1', archived: true });
 });
 
 afterEach(() => cleanup());
@@ -266,6 +268,27 @@ describe('Opportunities list', () => {
     const csv = new File(['Project,Location\nHarbour,Portland'], 'leads.csv', { type: 'text/csv' });
     await user.upload(screen.getByLabelText('Choose an EarlyBid CSV file'), csv);
     await waitFor(() => expect(api.uploadLeadsCsv).toHaveBeenCalledWith(csv));
+  });
+
+  it('opens details when clicking anywhere on an opportunity row', async () => {
+    const { user } = renderAt('/opportunities');
+    await screen.findByRole('table');
+
+    await user.click(screen.getByLabelText('Open opportunity Harbour Arts Centre'));
+
+    expect(await screen.findByRole('heading', { name: 'Email workspace' })).toBeInTheDocument();
+  });
+
+  it('deletes an opportunity from the list after confirmation', async () => {
+    const { user } = renderAt('/opportunities');
+    await screen.findByRole('table');
+
+    await user.click(screen.getAllByRole('button', { name: 'Delete opportunity Harbour Arts Centre' })[0]);
+    const modal = screen.getByRole('dialog', { name: 'Delete opportunity?' });
+    expect(within(modal).getByText('Harbour Arts Centre')).toBeInTheDocument();
+    await user.click(within(modal).getByRole('button', { name: 'Delete opportunity' }));
+
+    await waitFor(() => expect(api.deleteLead).toHaveBeenCalledWith('lead-1'));
   });
 
   it('shows the latest automatic result and next Pacific midnight without posting on mount', async () => {
@@ -714,5 +737,17 @@ describe('Opportunity email workspace', () => {
     expect(await screen.findByText('Email generation needs attention')).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Subject' })).toHaveValue('Accoya for Harbour Arts Centre');
     expect(screen.getByRole('button', { name: 'Retry generation' })).toBeInTheDocument();
+  });
+
+  it('shows a small draft-quality notice when generated with limited context', async () => {
+    vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({
+      latest_generation: job({ status: 'generated', error_code: 'limited_context_best_effort' }),
+      emails: [email()],
+      current_email_id: 'email-1',
+    }));
+    renderAt('/opportunities/lead-1');
+
+    expect(await screen.findByText(/Draft quality notice/i)).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Subject' })).toHaveValue('Accoya for Harbour Arts Centre');
   });
 });

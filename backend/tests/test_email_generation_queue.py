@@ -280,6 +280,21 @@ class EmailGenerationQueueTests(unittest.TestCase):
                     )
                 self.assertEqual(outcome.status, expected_status)
                 self.assertEqual(outcome.error_code, expected_status.value)
+                with self.session_factory() as db:
+                    email_count = db.scalar(
+                        select(func.count())
+                        .select_from(Email)
+                        .where(Email.agent_run_id == claim.run_id)
+                    )
+                    if agent_status is GenerationStatus.INSUFFICIENT_CONTEXT:
+                        self.assertEqual(email_count, 1)
+                        fallback = db.scalar(
+                            select(Email).where(Email.agent_run_id == claim.run_id)
+                        )
+                        self.assertEqual(fallback.status, EmailStatus.pending_review)
+                        self.assertIn("Quick Accoya check-in", fallback.subject)
+                    else:
+                        self.assertEqual(email_count, 0)
 
         lead_id = self._seed_lead("unexpected-terminal")
         self._enqueue(lead_id)
@@ -297,7 +312,11 @@ class EmailGenerationQueueTests(unittest.TestCase):
         self.assertEqual(outcome.error_code, "agent_execution_failed")
         with self.session_factory() as db:
             self.assertEqual(
-                db.scalar(select(func.count()).select_from(Email)),
+                db.scalar(
+                    select(func.count())
+                    .select_from(Email)
+                    .where(Email.agent_run_id == claim.run_id)
+                ),
                 0,
             )
             run = db.get(AgentRun, claim.run_id)
@@ -677,6 +696,75 @@ class EmailGenerationApiTests(unittest.TestCase):
         self.assertEqual(malformed_email.status_code, 404)
         self.assertEqual(missing_workspace.json(), {"detail": "Lead not found"})
         self.assertEqual(missing_email.json(), {"detail": "Email not found"})
+
+    def test_workspace_backfills_fallback_for_legacy_low_context_run(self) -> None:
+        lead_id = self._seed_lead("legacy-low-context")
+        queued = self._request_job(lead_id)
+        self.assertEqual(queued.status_code, 202)
+
+        with self.session_factory() as db:
+            claim = email_generation_service.claim_next_job(
+                db,
+                worker_id="legacy-backfill-worker",
+            )
+            self.assertIsNotNone(claim)
+            job = db.get(EmailGenerationJob, claim.job_id)
+            run = db.get(AgentRun, claim.run_id)
+            terminal = datetime.now(timezone.utc)
+            job.status = EmailGenerationJobStatus.insufficient_context
+            job.error_code = EmailGenerationJobStatus.insufficient_context.value
+            job.completed_at = terminal
+            run.status = AgentRunStatus.insufficient_context
+            run.error_code = EmailGenerationJobStatus.insufficient_context.value
+            run.completed_at = terminal
+            run.original_subject = None
+            run.original_body = None
+            db.commit()
+
+            self.assertIsNone(
+                db.scalar(select(Email.id).where(Email.agent_run_id == run.id))
+            )
+
+        workspace = self.client.get(f"/api/leads/{lead_id}/workspace")
+        self.assertEqual(workspace.status_code, 200)
+        payload = workspace.json()
+        self.assertEqual(payload["latest_generation"]["status"], "insufficient_context")
+        self.assertIsNotNone(payload["current_email_id"])
+        self.assertEqual(len(payload["emails"]), 1)
+        self.assertEqual(payload["emails"][0]["status"], "pending_review")
+        self.assertIn("Quick Accoya check-in", payload["emails"][0]["subject"])
+
+    def test_archive_hides_lead_and_blocks_workspace_and_generation(self) -> None:
+        archived_lead_id = self._seed_lead("archive-target")
+        remaining_lead_id = self._seed_lead("archive-other")
+
+        archive = self.client.delete(f"/api/leads/{archived_lead_id}")
+        self.assertEqual(archive.status_code, 200)
+        self.assertEqual(
+            archive.json(),
+            {"id": archived_lead_id, "archived": True},
+        )
+
+        list_response = self.client.get("/api/leads")
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(len(list_response.json()), 1)
+        self.assertEqual(list_response.json()[0]["id"], remaining_lead_id)
+
+        workspace = self.client.get(f"/api/leads/{archived_lead_id}/workspace")
+        self.assertEqual(workspace.status_code, 404)
+        self.assertEqual(workspace.json(), {"detail": "Lead not found"})
+
+        generation = self._request_job(archived_lead_id)
+        self.assertEqual(generation.status_code, 404)
+        self.assertEqual(generation.json(), {"detail": "Lead not found"})
+
+        archive_again = self.client.delete(f"/api/leads/{archived_lead_id}")
+        self.assertEqual(archive_again.status_code, 404)
+        self.assertEqual(archive_again.json(), {"detail": "Lead not found"})
+
+        with self.session_factory() as db:
+            archived = db.get(Lead, archived_lead_id)
+            self.assertIsNotNone(archived.archived_at)
 
 
 if __name__ == "__main__":

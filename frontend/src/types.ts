@@ -168,6 +168,11 @@ export type LeadWorkspace = {
   latest_generation: EmailGenerationJob | null;
 };
 
+export type LeadArchiveResult = {
+  id: string;
+  archived: boolean;
+};
+
 export type StrategyDocument = {
   id: string;
   s3_key: string;

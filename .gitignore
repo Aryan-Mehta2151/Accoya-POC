@@ -1,29 +1,26 @@
-# Byte-compiled / optimized
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
 *.egg-info/
-
-# Environments
-.env
 .venv/
 venv/
-env/
+.env
+.env.*
+*.sqlite3
 
-# Node / frontend
+# Node
 node_modules/
 dist/
-build/
+coverage/
+.vite/
 
 # IDE / OS
 .vscode/
 .idea/
 .DS_Store
+Thumbs.db
 
-# Logs & local data
+# Logs
 *.log
-*.sqlite3
-*.tmp
-.tmp*
-
-# Local sqlite runtime
-*.db

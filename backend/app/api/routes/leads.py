@@ -2,6 +2,7 @@
 
 One EarlyBid opportunity = one Lead = one card in the UI.
 """
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -17,6 +18,7 @@ from app.schemas.email_generation import (
 )
 from app.schemas.earlybid_sync import EarlyBidSyncStatusRead
 from app.schemas.lead import (
+    LeadArchiveResult,
     LeadListRead,
     LeadRead,
     LeadUploadResult,
@@ -127,7 +129,9 @@ async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)
 @router.get("", response_model=list[LeadListRead])
 def list_leads(db: Session = Depends(get_db)):
     leads = db.scalars(
-        select(Lead).order_by(Lead.score.desc().nullslast())
+        select(Lead)
+        .where(Lead.archived_at.is_(None))
+        .order_by(Lead.score.desc().nullslast())
     ).all()
     return [
         LeadListRead(
@@ -147,9 +151,16 @@ def list_leads(db: Session = Depends(get_db)):
 def get_lead_workspace(lead_id: str, db: Session = Depends(get_db)):
     """Return opportunity details, email history, and current generation state."""
 
-    lead = db.get(Lead, _canonical_lead_id(lead_id))
+    canonical_lead_id = _canonical_lead_id(lead_id)
+    lead = db.scalar(
+        select(Lead).where(
+            Lead.id == canonical_lead_id,
+            Lead.archived_at.is_(None),
+        )
+    )
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead not found")
+    email_generation_service.ensure_low_context_fallback_email(db, lead.id)
     emails = email_generation_service.emails_for_lead(db, lead.id)
     current_email = emails[0] if emails else None
     return LeadWorkspaceRead(
@@ -200,6 +211,27 @@ def request_email_generation(
             status_code=500,
             detail="Email generation could not be queued",
         ) from None
+
+
+@router.delete("/{lead_id}", response_model=LeadArchiveResult)
+def archive_lead(lead_id: str, db: Session = Depends(get_db)):
+    """Soft-delete an opportunity so it no longer appears in the list."""
+
+    canonical_lead_id = _canonical_lead_id(lead_id)
+    lead = db.scalar(
+        select(Lead)
+        .where(
+            Lead.id == canonical_lead_id,
+            Lead.archived_at.is_(None),
+        )
+        .with_for_update()
+    )
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    lead.archived_at = datetime.now(timezone.utc)
+    db.commit()
+    return LeadArchiveResult(id=lead.id, archived=True)
 
 
 def _canonical_lead_id(lead_id: str) -> str:

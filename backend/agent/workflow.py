@@ -11,7 +11,12 @@ from langgraph.graph import END, START, StateGraph
 
 from app.config import Settings, get_settings
 
-from .catalog import application_belongs_to_family, get_application, get_family
+from .catalog import (
+    ACCOYA_CATALOG,
+    application_belongs_to_family,
+    get_application,
+    get_family,
+)
 from .integrations import (
     BedrockStrategyRetriever,
     GeminiStructuredModel,
@@ -52,6 +57,9 @@ from .routing import get_routing_hints
 
 
 Clock = Callable[[], datetime]
+
+
+LOW_CONTEXT_WARNING_CODE = "limited_context_best_effort"
 
 
 class _UnavailableStrategyRetriever:
@@ -295,6 +303,7 @@ class AccoyaEmailAgent:
         telemetry = state["telemetry"]
         warnings = list(state.get("warnings", []))
         selection = state["selection"]
+        compose_selection = selection
         chunks = state.get("strategy_chunks", [])
 
         if state.get("error"):
@@ -308,14 +317,13 @@ class AccoyaEmailAgent:
             return self._finish_compose(result, telemetry, started_ms, warnings)
 
         if selection.selection_status is SelectionStatus.LOW_CONFIDENCE:
-            result = self._result(
-                state,
-                status=GenerationStatus.INSUFFICIENT_CONTEXT,
-                telemetry=telemetry,
-                warnings=warnings,
-                strategy_references=chunks,
+            compose_selection = _compose_selection_for_low_context(
+                state["normalized_lead"],
+                state.get("routing_hints", []),
             )
-            return self._finish_compose(result, telemetry, started_ms, warnings)
+            warnings.append(
+                f"{LOW_CONTEXT_WARNING_CODE}: Lead context is limited; generated a best-effort draft."
+            )
 
         try:
             invocation = self._model.invoke_structured(
@@ -323,7 +331,7 @@ class AccoyaEmailAgent:
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=build_compose_prompt(
                     state["normalized_lead"],
-                    selection,
+                    compose_selection,
                     chunks,
                     nurturing_chunks=state.get("nurturing_chunks", []),
                     nurturing_route=state.get("nurturing_route"),
@@ -345,8 +353,10 @@ class AccoyaEmailAgent:
             return self._finish_compose(result, telemetry, started_ms, warnings)
 
         if (
-            draft.selected_product_family != selection.selected_product_family
-            or draft.selected_application != selection.selected_application
+            draft.selected_product_family
+            != compose_selection.selected_product_family
+            or draft.selected_application
+            != compose_selection.selected_application
         ):
             warnings.append("Email composition returned a mismatched catalog pair.")
             result = self._result(
@@ -359,7 +369,7 @@ class AccoyaEmailAgent:
             return self._finish_compose(result, telemetry, started_ms, warnings)
 
         result = self._result(
-            state,
+            {**state, "selection": compose_selection},
             status=GenerationStatus.GENERATED,
             telemetry=telemetry,
             warnings=warnings,
@@ -489,6 +499,29 @@ def _fallback_selection_from_hints(
             "Deterministic fallback from routing hints after analysis provider failure."
         ),
         retrieval_query=_catalog_retrieval_query(lead, hint),
+        selection_status=SelectionStatus.SELECTED,
+    )
+
+
+def _compose_selection_for_low_context(
+    lead: NormalizedLead,
+    hints: list[RoutingHint],
+) -> ProductSelection:
+    hinted = _fallback_selection_from_hints(lead, hints)
+    if hinted.selection_status is SelectionStatus.SELECTED:
+        return hinted
+
+    default_family = ACCOYA_CATALOG.families[0]
+    default_application = default_family.applications[0]
+    return ProductSelection(
+        selected_product_family=default_family.id,
+        selected_application=default_application.id,
+        confidence=MIN_SELECTION_CONFIDENCE,
+        selection_reason="Default low-context compose selection.",
+        retrieval_query=(
+            f"{default_family.id} {default_application.id} "
+            f"{(lead.project or '').strip()} {(lead.signal or '').strip()}"
+        ).strip(),
         selection_status=SelectionStatus.SELECTED,
     )
 

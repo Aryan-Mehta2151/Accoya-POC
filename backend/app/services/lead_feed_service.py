@@ -295,9 +295,20 @@ def upsert_feed_rows(
                 created_leads.append(lead)
             created += 1
         else:
+            # A restored archived lead should behave like a brand-new
+            # opportunity, without prior outreach status/history.
+            restored_from_archive = lead.archived_at is not None
+            if restored_from_archive:
+                lead.agent_runs.clear()
+                lead.email_generation_jobs.clear()
             for attr, value in fields.items():
                 setattr(lead, attr, value)
-            updated += 1
+            if restored_from_archive:
+                if created_leads is not None:
+                    created_leads.append(lead)
+                created += 1
+            else:
+                updated += 1
         touched.append(lead)
     return touched, created, updated
 

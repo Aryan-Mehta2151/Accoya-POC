@@ -65,6 +65,16 @@ def validate_web_auth_settings(settings: Settings) -> None:
         errors.append(
             "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES must be between 1 and 60"
         )
+    if not 5 <= settings.access_request_token_expire_minutes <= 10080:
+        errors.append(
+            "ACCESS_REQUEST_TOKEN_EXPIRE_MINUTES must be between 5 and 10080"
+        )
+    if not 1 <= settings.access_request_cooldown_minutes <= 10080:
+        errors.append(
+            "ACCESS_REQUEST_COOLDOWN_MINUTES must be between 1 and 10080"
+        )
+    if not str(settings.access_request_approver_email).strip():
+        errors.append("ACCESS_REQUEST_APPROVER_EMAIL must not be blank")
     if not settings.api_prefix.startswith("/"):
         errors.append("API_PREFIX must start with '/'")
 

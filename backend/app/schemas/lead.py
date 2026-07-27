@@ -67,6 +67,11 @@ class LeadUploadResult(BaseModel):
     generation_queued: int
 
 
+class LeadArchiveResult(BaseModel):
+    id: str
+    archived: bool
+
+
 class CurrentEmailSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

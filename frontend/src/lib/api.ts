@@ -7,6 +7,7 @@ import type {
   EmailDeliveryJob,
   EmailGenerationJob,
   EmailStatus,
+  LeadArchiveResult,
   Lead,
   LeadWorkspace,
   StrategyDocument,
@@ -297,6 +298,12 @@ export const authApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email }),
     }),
+  requestAccess: (email: string, name?: string) =>
+    request<{ message: string }>('/auth/request-access', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, name: name?.trim() || undefined }),
+    }),
   resetPassword: (token: string, password: string) =>
     request<{ message: string }>('/auth/reset-password', {
       method: 'POST',
@@ -335,6 +342,11 @@ export const api = {
   },
   getLeadWorkspace: (leadId: string) =>
     request<LeadWorkspace>(`/leads/${encodeURIComponent(leadId)}/workspace`),
+  deleteLead: (leadId: string) =>
+    request<LeadArchiveResult>(
+      `/leads/${encodeURIComponent(leadId)}`,
+      { method: 'DELETE' },
+    ),
   queueEmailGeneration: (leadId: string, idempotencyKey: string) =>
     request<EmailGenerationJob>(`/leads/${encodeURIComponent(leadId)}/email-generations`, {
       method: 'POST',

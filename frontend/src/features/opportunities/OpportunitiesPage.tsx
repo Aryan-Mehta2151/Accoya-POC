@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDown,
@@ -11,8 +11,9 @@ import {
   RefreshCw,
   Search,
   Sparkles,
+  Trash2,
 } from "lucide-react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import { EmptyState, ErrorState, LoadingState, PageHeader, StatusBadge } from "../../components/ui";
@@ -276,7 +277,15 @@ function OpportunityOutreachBadges({ lead }: { lead: Lead }) {
   );
 }
 
-function OpportunityCard({ lead }: { lead: Lead }) {
+function OpportunityCard({
+  lead,
+  onDelete,
+  deleting,
+}: {
+  lead: Lead;
+  onDelete: (lead: Lead) => void;
+  deleting: boolean;
+}) {
   return (
     <article className={styles.mobileCard}>
       <div className={styles.mobileCardTopline}>
@@ -309,16 +318,30 @@ function OpportunityCard({ lead }: { lead: Lead }) {
           <dd><OpportunityOutreachBadges lead={lead} /></dd>
         </div>
       </dl>
-      <Link className={styles.cardLink} to={`/opportunities/${lead.id}`}>
-        View opportunity <span aria-hidden="true">→</span>
-      </Link>
+      <div className={styles.cardActions}>
+        <Link className={styles.cardLink} to={`/opportunities/${lead.id}`}>
+          View opportunity <span aria-hidden="true">→</span>
+        </Link>
+        <button
+          type="button"
+          className={styles.dangerButton}
+          disabled={deleting}
+          onClick={() => onDelete(lead)}
+          aria-label={`Delete opportunity ${displayValue(lead.project)}`}
+        >
+          <Trash2 aria-hidden="true" size={15} />
+          {deleting ? "Deleting…" : "Delete"}
+        </button>
+      </div>
     </article>
   );
 }
 
 export function OpportunitiesPage() {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
+  const [pendingDeleteLead, setPendingDeleteLead] = useState<Lead | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const observedAutomaticSyncRef = useRef<
     { id: string; status: EarlyBidSyncRunStatus } | null | undefined
@@ -404,6 +427,22 @@ export function OpportunitiesPage() {
     },
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: (leadId: string) => api.deleteLead(leadId),
+    onSuccess: async () => {
+      setPendingDeleteLead(null);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.leads });
+      toast.success("Opportunity deleted", {
+        description: "The opportunity has been removed from this list.",
+      });
+    },
+    onError: (error) => {
+      toast.error("Could not delete opportunity", {
+        description: errorMessage(error, "Please try again in a moment."),
+      });
+    },
+  });
+
   const leads = useMemo(() => leadsQuery.data ?? [], [leadsQuery.data]);
   const stateOptions = useMemo(() => uniqueOptions(leads.map((lead) => lead.state)), [leads]);
   const timingOptions = useMemo(() => uniqueOptions(leads.map((lead) => lead.timing)), [leads]);
@@ -430,6 +469,20 @@ export function OpportunitiesPage() {
   const isMutating = syncMutation.isPending || uploadMutation.isPending;
   const automaticSyncActive = automaticSyncIsActive(latestAutomaticRun?.status);
   const manualSyncDisabled = isMutating || automaticSyncActive;
+
+  const handleDeleteLead = (lead: Lead) => {
+    setPendingDeleteLead(lead);
+  };
+
+  const closeDeleteModal = () => {
+    if (deleteMutation.isPending) return;
+    setPendingDeleteLead(null);
+  };
+
+  const confirmDeleteLead = () => {
+    if (!pendingDeleteLead) return;
+    deleteMutation.mutate(pendingDeleteLead.id);
+  };
 
   const actions = (
     <div className={styles.headerActions}>
@@ -641,15 +694,44 @@ export function OpportunitiesPage() {
                   </thead>
                   <tbody>
                     {filteredLeads.map((lead) => (
-                      <tr key={lead.id}>
+                      <tr
+                        key={lead.id}
+                        className={styles.clickableRow}
+                        tabIndex={0}
+                        aria-label={`Open opportunity ${displayValue(lead.project)}`}
+                        onClick={() => navigate(`/opportunities/${lead.id}`)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            navigate(`/opportunities/${lead.id}`);
+                          }
+                        }}
+                      >
                         <td>
-                          <Link className={styles.projectLink} to={`/opportunities/${lead.id}`}>
+                          <span className={styles.projectLink}>
                             {displayValue(lead.project)}
-                          </Link>
+                          </span>
                           <span className={styles.projectMeta}>
                             <Sparkles aria-hidden="true" size={13} />
                             {displayValue(lead.signal)}
                           </span>
+                          <div className={styles.rowActions}>
+                            <button
+                              type="button"
+                              className={styles.dangerButton}
+                              disabled={deleteMutation.isPending && deleteMutation.variables === lead.id}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleDeleteLead(lead);
+                              }}
+                              aria-label={`Delete opportunity ${displayValue(lead.project)}`}
+                            >
+                              <Trash2 aria-hidden="true" size={14} />
+                              {deleteMutation.isPending && deleteMutation.variables === lead.id
+                                ? "Deleting…"
+                                : "Delete"}
+                            </button>
+                          </div>
                         </td>
                         <td>
                           <span className={styles.locationCell}>
@@ -678,12 +760,59 @@ export function OpportunitiesPage() {
               </div>
 
               <div className={styles.mobileList}>
-                {filteredLeads.map((lead) => <OpportunityCard key={lead.id} lead={lead} />)}
+                {filteredLeads.map((lead) => (
+                  <OpportunityCard
+                    key={lead.id}
+                    lead={lead}
+                    onDelete={handleDeleteLead}
+                    deleting={deleteMutation.isPending && deleteMutation.variables === lead.id}
+                  />
+                ))}
               </div>
             </>
           )}
         </>
       )}
+
+      {pendingDeleteLead ? (
+        <div className={styles.confirmationOverlay} onClick={closeDeleteModal}>
+          <div
+            className={styles.confirmationModal}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-opportunity-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 id="delete-opportunity-title">Delete opportunity?</h3>
+            <p>
+              <strong>{displayValue(pendingDeleteLead.project)}</strong>
+              <br />
+              {[pendingDeleteLead.location, pendingDeleteLead.state].filter(Boolean).join(", ") || "Location not provided"}
+            </p>
+            <p>
+              This removes it from your current list. If it appears in a future feed sync, it may show up again.
+            </p>
+            <div className={styles.confirmationButtons}>
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                onClick={closeDeleteModal}
+                disabled={deleteMutation.isPending}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={styles.dangerButton}
+                onClick={confirmDeleteLead}
+                disabled={deleteMutation.isPending}
+              >
+                {deleteMutation.isPending ? "Deleting…" : "Delete opportunity"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

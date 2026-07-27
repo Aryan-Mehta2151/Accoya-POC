@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { Link, Navigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
+import styles from './auth.module.css';
 
 function callbackDestination(): string {
   try {
@@ -17,6 +18,12 @@ export function CallbackPage() {
   const { announceSessionChanged, status, retryVerification } = useAuth();
   const announcedRef = useRef(false);
   const oauthError = searchParams.get('error');
+  const oauthFailureMessage =
+    oauthError === 'access_not_approved'
+      ? 'This Google account does not have access yet. Please ask your admin to approve your account, then try again.'
+      : oauthError === 'access_denied'
+        ? 'Google sign-in was cancelled before completion.'
+        : 'Google sign-in could not be completed. Please try again.';
 
   useEffect(() => {
     if (!oauthError && status === 'authenticated' && !announcedRef.current) {
@@ -27,15 +34,13 @@ export function CallbackPage() {
 
   if (oauthError) {
     return (
-      <main style={{ display: 'grid', placeItems: 'center', minHeight: '100vh', padding: '24px' }}>
-        <div style={{ textAlign: 'center' }}>
+      <main className={styles.callbackContainer}>
+        <div className={styles.callbackCard}>
           <h1>Google sign-in failed</h1>
-          <p>
-            {oauthError === 'access_denied'
-              ? 'Google sign-in was cancelled.'
-              : 'Google sign-in could not be completed.'}
-          </p>
-          <Link to='/login'>Return to sign in</Link>
+          <p>{oauthFailureMessage}</p>
+          <Link to='/login' className={styles.callbackActionButton}>
+            Go to sign in
+          </Link>
         </div>
       </main>
     );
@@ -47,8 +52,8 @@ export function CallbackPage() {
 
   if (status === 'verification_error') {
     return (
-      <main style={{ display: 'grid', placeItems: 'center', minHeight: '100vh', padding: '24px' }}>
-        <div style={{ textAlign: 'center' }}>
+      <main className={styles.callbackContainer}>
+        <div className={styles.callbackCard}>
           <h1>We could not verify your sign-in</h1>
           <p>Check your connection and retry the secure session check.</p>
           <button type='button' className='primaryButton' onClick={() => void retryVerification()}>
@@ -61,18 +66,20 @@ export function CallbackPage() {
 
   if (status === 'anonymous') {
     return (
-      <main style={{ display: 'grid', placeItems: 'center', minHeight: '100vh', padding: '24px' }}>
-        <div style={{ textAlign: 'center' }}>
+      <main className={styles.callbackContainer}>
+        <div className={styles.callbackCard}>
           <h1>Sign-in was not completed</h1>
           <p>Your session is not active. Please try signing in again.</p>
-          <Link to='/login'>Return to sign in</Link>
+          <Link to='/login' className={styles.callbackActionButton}>
+            Go to sign in
+          </Link>
         </div>
       </main>
     );
   }
 
   return (
-    <main style={{ display: 'grid', placeItems: 'center', minHeight: '100vh' }}>
+    <main className={styles.callbackContainer}>
       <p>Verifying your secure session...</p>
     </main>
   );

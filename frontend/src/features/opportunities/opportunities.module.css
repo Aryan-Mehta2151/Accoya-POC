@@ -246,6 +246,7 @@
 .selectField select:focus,
 .primaryButton:focus-visible,
 .secondaryButton:focus-visible,
+.dangerButton:focus-visible,
 .sortButton:focus-visible,
 .clearButton:focus-visible,
 .cardLink:focus-visible,
@@ -398,6 +399,23 @@
   background: rgb(214 185 140 / 8%);
 }
 
+.clickableRow {
+  cursor: pointer;
+}
+
+.clickableRow:focus-visible {
+  outline: none;
+}
+
+.clickableRow:hover td {
+  background: linear-gradient(90deg, rgb(214 185 140 / 10%), rgb(214 185 140 / 4%));
+}
+
+.clickableRow:focus-visible td {
+  background: linear-gradient(90deg, rgb(23 74 54 / 11%), rgb(23 74 54 / 5%));
+  box-shadow: inset 0 0 0 1px rgb(23 74 54 / 20%);
+}
+
 .projectLink {
   display: block;
   width: fit-content;
@@ -411,8 +429,7 @@
 
 .projectLink:hover {
   color: var(--color-forest, #174a36);
-  text-decoration: underline;
-  text-underline-offset: 0.2em;
+  text-decoration: none;
 }
 
 .projectMeta,
@@ -421,12 +438,92 @@
   display: flex;
 }
 
+.rowActions {
+  margin-top: 0.55rem;
+}
+
 .projectMeta {
   align-items: center;
   gap: 0.3rem;
   margin-top: 0.5rem;
   color: rgb(23 33 27 / 51%);
   font-size: 0.72rem;
+}
+
+.cardActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.dangerButton {
+  min-height: 2.2rem;
+  border-radius: 0.6rem;
+  padding: 0.44rem 0.7rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  border: 1px solid rgb(157 62 45 / 34%);
+  color: #7b3224;
+  background: rgb(199 101 66 / 8%);
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+}
+
+.dangerButton:hover:not(:disabled) {
+  border-color: rgb(157 62 45 / 50%);
+  background: rgb(199 101 66 / 15%);
+  color: #632818;
+}
+
+.dangerButton:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.confirmationOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(16 20 17 / 42%);
+}
+
+.confirmationModal {
+  width: min(100%, 28rem);
+  border: 1px solid rgb(23 33 27 / 14%);
+  border-radius: 1rem;
+  padding: 1.1rem;
+  background: var(--color-paper, #fbfaf6);
+  box-shadow: 0 22px 44px rgb(0 0 0 / 24%);
+}
+
+.confirmationModal h3 {
+  margin: 0;
+  color: var(--color-ink, #17211b);
+  font: 600 1.12rem/1.2 var(--font-display, "Newsreader", Georgia, serif);
+}
+
+.confirmationModal p {
+  margin: 0.75rem 0 0;
+  color: rgb(23 33 27 / 66%);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.confirmationButtons {
+  margin-top: 1rem;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
 }
 
 .locationCell {
@@ -1129,6 +1226,24 @@
   text-transform: capitalize;
 }
 
+.lowContextNotice {
+  margin-bottom: 0.95rem;
+  padding: 0.72rem 0.8rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  border: 1px solid rgb(179 110 39 / 24%);
+  border-radius: 0.7rem;
+  color: rgb(117 79 28 / 92%);
+  background: rgb(214 185 140 / 13%);
+}
+
+.lowContextNotice p {
+  margin: 0;
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
@@ -1232,6 +1347,16 @@
   .newDraftNotice {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .cardActions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .cardActions .cardLink,
+  .cardActions .dangerButton {
+    width: 100%;
   }
 
   .workspaceHeader .primaryButton,

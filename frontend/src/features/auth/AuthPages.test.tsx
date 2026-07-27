@@ -8,6 +8,7 @@ import type { AuthContextValue } from '../../hooks/authContext';
 import { useAuth } from '../../hooks/useAuth';
 import { CallbackPage } from './CallbackPage';
 import { LoginPage } from './LoginPage';
+import { RequestAccessPage } from './RequestAccessPage';
 import { ResetPasswordPage } from './ResetPasswordPage';
 
 vi.mock('../../hooks/useAuth', () => ({ useAuth: vi.fn() }));
@@ -17,6 +18,7 @@ const auth: AuthContextValue = {
   status: 'anonymous',
   loading: false,
   login: vi.fn(),
+  requestAccess: vi.fn(),
   logout: vi.fn(),
   forgotPassword: vi.fn(),
   resetPassword: vi.fn(),
@@ -34,7 +36,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('authentication pages', () => {
-  it('offers approved-account login without signup and preserves a protected deep link', async () => {
+  it('offers approved-account login and preserves a protected deep link', async () => {
     render(
       <MemoryRouter initialEntries={[{
         pathname: '/login',
@@ -47,8 +49,7 @@ describe('authentication pages', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByText('Sign up')).not.toBeInTheDocument();
-    expect(screen.getByText('Accounts are managed by your Accoya administrator.')).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Request access' })).toBeVisible();
     fireEvent.change(screen.getByLabelText('Email Address'), {
       target: { value: 'approved@example.com' },
     });
@@ -76,6 +77,33 @@ describe('authentication pages', () => {
     expect(auth.startGoogleLogin).toHaveBeenCalledTimes(1);
     expect(window.sessionStorage.getItem('accoya-auth-return-to')).toBe('/');
     expect(window.localStorage.getItem('access_token')).toBeNull();
+  });
+
+  it('submits a request-access form and shows backend success message', async () => {
+    vi.mocked(auth.requestAccess).mockResolvedValueOnce(
+      'If access can be granted, the request will be reviewed shortly.',
+    );
+    render(
+      <MemoryRouter initialEntries={['/request-access']}>
+        <RequestAccessPage />
+      </MemoryRouter>,
+    );
+
+    fireEvent.change(screen.getByLabelText('Work Email Address'), {
+      target: { value: 'new.user@example.com' },
+    });
+    fireEvent.change(screen.getByLabelText('Name (optional)'), {
+      target: { value: 'New User' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Request Access' }));
+
+    await waitFor(() => expect(auth.requestAccess).toHaveBeenCalledWith(
+      'new.user@example.com',
+      'New User',
+    ));
+    expect(
+      await screen.findByText('If access can be granted, the request will be reviewed shortly.'),
+    ).toBeVisible();
   });
 
   it('hydrates an OAuth cookie session without reading a token from the URL', () => {
@@ -141,12 +169,18 @@ describe('authentication pages', () => {
       },
     });
     render(
-      <MemoryRouter initialEntries={['/auth/callback?error=oauth_failed']}>
+      <MemoryRouter initialEntries={['/auth/callback?error=access_not_approved']}>
         <CallbackPage />
       </MemoryRouter>,
     );
 
     expect(screen.getByText('Google sign-in failed')).toBeVisible();
+    expect(
+      screen.getByText(
+        'This Google account does not have access yet. Please ask your admin to approve your account, then try again.',
+      ),
+    ).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Go to sign in' })).toBeVisible();
     expect(auth.announceSessionChanged).not.toHaveBeenCalled();
   });
 });
