@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
+from html import escape
 from urllib.parse import urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -100,13 +101,83 @@ def _invalid_reset_token() -> HTTPException:
     )
 
 
-def _invalid_access_request_token() -> HTTPException:
-    return HTTPException(
+def _auth_status_page(
+    *,
+    title: str,
+    heading: str,
+    body: str,
+    accent: str,
+    background: str,
+    status_code: int = status.HTTP_200_OK,
+) -> HTMLResponse:
+    html = f"""
+    <!doctype html>
+    <html lang=\"en\">
+        <head>
+            <meta charset=\"utf-8\" />
+            <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+            <title>{escape(title)}</title>
+        </head>
+        <body style=\"margin:0; padding:0; background:#f8f7f4; font-family:Segoe UI, Arial, sans-serif; color:#1f2937;\">
+            <main style=\"min-height:100vh; display:grid; place-items:center; padding:24px;\">
+                <section style=\"width:100%; max-width:560px; background:{background}; border:1px solid #d1d5db; border-radius:14px; padding:28px; box-shadow:0 8px 22px rgba(0,0,0,0.08);\">
+                    <p style=\"margin:0 0 8px; font-size:13px; letter-spacing:0.06em; text-transform:uppercase; color:{accent};\">Accoya Access Review</p>
+                    <h1 style=\"margin:0 0 10px; font-size:28px; line-height:1.2; color:{accent};\">{escape(heading)}</h1>
+                    <p style=\"margin:0; font-size:15px; line-height:1.6;\">{escape(body)}</p>
+                </section>
+            </main>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html, status_code=status_code)
+
+
+def _review_result_page(*, approved: bool, requester_email: str) -> HTMLResponse:
+    if approved:
+        return _auth_status_page(
+            title="Access Request Approved",
+            heading="Access Request Approved",
+            body=(
+                "The requester has been approved. A password setup email has been "
+                f"sent to {requester_email}."
+            ),
+            accent="#065f46",
+            background="#ecfdf5",
+            status_code=status.HTTP_200_OK,
+        )
+
+    return _auth_status_page(
+        title="Access Request Rejected",
+        heading="Access Request Rejected",
+        body=(
+            f"The request from {requester_email} was rejected. "
+            "No account changes were applied."
+        ),
+        accent="#991b1b",
+        background="#fef2f2",
+        status_code=status.HTTP_200_OK,
+    )
+
+
+def _review_failure_page(*, requester_email: str | None = None) -> HTMLResponse:
+    if requester_email:
+        body = (
+            f"The access-review link for {requester_email} is no longer valid. "
+            "It may have expired, already been used, or been opened from a different request."
+        )
+    else:
+        body = (
+            "The access-review link is no longer valid. It may have expired, "
+            "already been used, or have been opened from an unsupported request."
+        )
+
+    return _auth_status_page(
+        title="Access Review Link Invalid",
+        heading="This access review link is no longer valid",
+        body=body,
+        accent="#92400e",
+        background="#fffbeb",
         status_code=status.HTTP_400_BAD_REQUEST,
-        detail={
-            "code": "invalid_access_request_token",
-            "message": "The access-review link is invalid or expired.",
-        },
     )
 
 
@@ -127,46 +198,6 @@ def _review_link(
     prefix = settings.api_prefix.rstrip("/")
     query = urlencode({"token": token, "decision": decision})
     return f"{api_origin}{prefix}/auth/access-requests/review?{query}"
-
-
-def _review_result_page(*, approved: bool, requester_email: str) -> HTMLResponse:
-        if approved:
-                title = "Access Request Approved"
-                body = (
-                        "The requester has been approved. A password setup email has been "
-                        f"sent to {requester_email}."
-                )
-                accent = "#065f46"
-                background = "#ecfdf5"
-        else:
-                title = "Access Request Rejected"
-                body = (
-                        f"The request from {requester_email} was rejected. "
-                        "No account changes were applied."
-                )
-                accent = "#991b1b"
-                background = "#fef2f2"
-
-        html = f"""
-        <!doctype html>
-        <html lang=\"en\">
-            <head>
-                <meta charset=\"utf-8\" />
-                <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-                <title>{title}</title>
-            </head>
-            <body style=\"margin:0; padding:0; background:#f8f7f4; font-family:Segoe UI, Arial, sans-serif; color:#1f2937;\">
-                <main style=\"min-height:100vh; display:grid; place-items:center; padding:24px;\">
-                    <section style=\"width:100%; max-width:560px; background:{background}; border:1px solid #d1d5db; border-radius:14px; padding:28px; box-shadow:0 8px 22px rgba(0,0,0,0.08);\">
-                        <p style=\"margin:0 0 8px; font-size:13px; letter-spacing:0.06em; text-transform:uppercase; color:{accent};\">Accoya Access Review</p>
-                        <h1 style=\"margin:0 0 10px; font-size:28px; line-height:1.2; color:{accent};\">{title}</h1>
-                        <p style=\"margin:0; font-size:15px; line-height:1.6;\">{body}</p>
-                    </section>
-                </main>
-            </body>
-        </html>
-        """
-        return HTMLResponse(content=html, status_code=status.HTTP_200_OK)
 
 
 def _set_authenticated_session(
@@ -408,11 +439,11 @@ def review_access_request(
         .with_for_update()
     ).scalars().first()
     if request_record is None:
-        raise _invalid_access_request_token()
+        return _review_failure_page()
 
     expires_at = request_record.expires_at
     if expires_at is None:
-        raise _invalid_access_request_token()
+        return _review_failure_page(requester_email=request_record.email)
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
 
@@ -424,7 +455,7 @@ def review_access_request(
         request_record.reviewed_at = now
         request_record.reviewed_by = str(settings.access_request_approver_email)
         db.commit()
-        raise _invalid_access_request_token()
+        return _review_failure_page(requester_email=request_record.email)
 
     if decision == "approve":
         user = db.execute(

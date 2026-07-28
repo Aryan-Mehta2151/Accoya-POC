@@ -707,10 +707,8 @@ class AuthApiTests(unittest.TestCase):
             params={"token": "x" * 32, "decision": "approve"},
         )
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            response.json()["detail"]["code"],
-            "invalid_access_request_token",
-        )
+        self.assertIn("This access review link is no longer valid", response.text)
+        self.assertIn("Access Review Link Invalid", response.text)
 
         with self.sessions() as db:
             request_record = db.scalar(

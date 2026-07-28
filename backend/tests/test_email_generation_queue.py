@@ -292,7 +292,9 @@ class EmailGenerationQueueTests(unittest.TestCase):
                             select(Email).where(Email.agent_run_id == claim.run_id)
                         )
                         self.assertEqual(fallback.status, EmailStatus.pending_review)
-                        self.assertIn("Quick Accoya check-in", fallback.subject)
+                        self.assertIn("Accoya", fallback.subject)
+                        self.assertIn("Depending on the application", fallback.body)
+                        self.assertIn("Best regards", fallback.body)
                     else:
                         self.assertEqual(email_count, 0)
 
@@ -732,7 +734,8 @@ class EmailGenerationApiTests(unittest.TestCase):
         self.assertIsNotNone(payload["current_email_id"])
         self.assertEqual(len(payload["emails"]), 1)
         self.assertEqual(payload["emails"][0]["status"], "pending_review")
-        self.assertIn("Quick Accoya check-in", payload["emails"][0]["subject"])
+        self.assertIn("Accoya", payload["emails"][0]["subject"])
+        self.assertIn("Depending on the application", payload["emails"][0]["body"])
 
     def test_archive_hides_lead_and_blocks_workspace_and_generation(self) -> None:
         archived_lead_id = self._seed_lead("archive-target")

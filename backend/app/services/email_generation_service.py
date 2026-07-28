@@ -748,13 +748,13 @@ def _fallback_draft_for_low_context(lead: Lead | None) -> tuple[str, str]:
         if value
     )
     place = location or "your area"
-    subject = f"Quick Accoya check-in for {project}"
+    subject = f"Accoya opportunity for {project}"
     body = (
         f"Hi,\n\n"
-        f"I wanted to quickly reach out about {project} in {place}. "
-        "Accoya could be a strong fit depending on your material and performance goals.\n\n"
-        "If useful, I can share a short, tailored recommendation once we have a bit more project detail "
-        "(application, timing, and decision criteria).\n\n"
+        f"I wanted to reach out about {project} in {place}. "
+        "Accoya may be a strong fit depending on the application, performance requirements, and project timing.\n\n"
+        "Depending on the application, Accoya can offer a compelling combination of durability, dimensional stability, and design flexibility. "
+        "If it would be helpful, I can share a short, tailored recommendation once we have a bit more project detail.\n\n"
         "Best regards,"
     )
     return subject, body
