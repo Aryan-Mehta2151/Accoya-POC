@@ -96,6 +96,7 @@ class Settings(BaseSettings):
     # SMTP
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587
+    smtp_username: str | None = None
     smtp_email: str = ""
     smtp_password: str = ""
 

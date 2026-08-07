@@ -98,7 +98,12 @@ def _deliver_message(
             server.ehlo()
             server.starttls(context=ssl.create_default_context())
             server.ehlo()
-            server.login(settings.smtp_email, settings.smtp_password)
+            smtp_username = (
+                settings.smtp_username.strip()
+                if settings.smtp_username and settings.smtp_username.strip()
+                else settings.smtp_email.strip()
+            )
+            server.login(smtp_username, settings.smtp_password)
         except smtplib.SMTPAuthenticationError as exc:
             raise EmailDeliveryFailure("smtp_authentication_failed") from exc
         except (

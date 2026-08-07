@@ -130,14 +130,20 @@ AUTH_COOKIE_SECURE=false
 CORS_ALLOWED_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
 FRONTEND_URL=http://localhost:5173
 GOOGLE_REDIRECT_URI=http://localhost:8000/api/auth/callback/google
+ACCESS_REQUEST_APPROVER_EMAIL=approver@example.com
+ACCESS_REQUEST_TOKEN_EXPIRE_MINUTES=1440
+ACCESS_REQUEST_COOLDOWN_MINUTES=15
 ```
 
 Application startup rejects blank or weak authentication secrets. Secure
-cookies are mandatory outside development. Password-reset email requires the
-SMTP settings described below. Google sign-in additionally requires Google
-OAuth credentials and the configured callback URI. Open local frontend and API
-URLs through the same hostname: use `localhost` for both or `127.0.0.1` for
-both.
+cookies are mandatory outside development. Password resets and access-request
+review and decision messages use the SMTP settings described below. Google
+sign-in additionally requires Google OAuth credentials and the configured
+callback URI. Open local frontend and API URLs through the same hostname: use
+`localhost` for both or `127.0.0.1` for both. Approval and rejection links use
+the API origin from `GOOGLE_REDIRECT_URI`; with the example localhost value,
+they work only where `localhost:8000` reaches the running backend. Configure a
+reachable deployed origin before sending review mail to a remote approver.
 
 Then create the database, if needed, and migrate it to the current Alembic
 head:
@@ -257,9 +263,11 @@ leases remain terminal until a user explicitly retries.
 
 ### 4. Start the email-delivery worker
 
-Configure `JWT_SECRET_KEY`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_EMAIL`, and
-`SMTP_PASSWORD` in `backend/.env`. Then, in another backend terminal, start
-one delivery worker:
+Configure `JWT_SECRET_KEY`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`,
+`SMTP_EMAIL`, and `SMTP_PASSWORD` in `backend/.env`. The example uses SMTP2GO
+at `mail.smtp2go.com:2525` with STARTTLS: `SMTP_USERNAME` is the relay login,
+while `SMTP_EMAIL` is the verified sender address. Then, in another backend
+terminal, start one delivery worker:
 
 ```powershell
 cd backend
@@ -271,7 +279,8 @@ The authenticated Send Email action only queues durable work. This separately
 supervised worker is the process that can contact SMTP and send real external
 email. Starting it is therefore explicit authorization to deliver any queued,
 approved outreach using the configured account. Do not start it as a health
-check or automated test.
+check or automated test. The same SMTP transport also sends password resets,
+access-review notifications, and access approval or rejection decisions.
 
 The worker records relay acceptance as `succeeded` and then marks the review
 email `sent`. Relay acceptance means the SMTP server accepted responsibility
@@ -362,12 +371,14 @@ directory.
 | EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Configures Bearer-authenticated manual and scheduled feed sync. The reseller/client scope is also part of the derived identity for rows without a source ID. |
 | Daily sync worker | `LEAD_AUTO_SYNC_TIMEZONE`, `LEAD_AUTO_SYNC_POLL_SECONDS`, `LEAD_AUTO_SYNC_HEARTBEAT_SECONDS`, `LEAD_AUTO_SYNC_STALE_SECONDS` | Defaults to `America/Los_Angeles`, 30, 15, and 300 seconds. The timezone must be an IANA name and the stale threshold must exceed the heartbeat interval. |
 | Authentication | `JWT_SECRET_KEY`, `CSRF_SECRET_KEY`, `JWT_ISSUER`, `JWT_AUDIENCE`, `AUTH_COOKIE_SECURE`, `FRONTEND_URL` | JWT and CSRF secrets must each contain at least 32 bytes. Sessions last eight hours. Production requires HTTPS, secure cookies, and one frontend/API hostname so SameSite=Lax cookies work. All business routes require an active provisioned user. |
+| Access requests | `ACCESS_REQUEST_APPROVER_EMAIL`, `ACCESS_REQUEST_TOKEN_EXPIRE_MINUTES`, `ACCESS_REQUEST_COOLDOWN_MINUTES` | Sends single-use approval/rejection links to the configured approver and decision mail to the requester. The example values expire review links after 1,440 minutes and throttle repeat requests for 15 minutes. |
 | Google OAuth | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` | Password alternative for active approved users. Production requires both credentials and the exact `${API_PREFIX}/auth/callback/google` URL. The backend uses state and PKCE and never places a JWT in a redirect URL. |
-| SMTP | `SMTP_HOST`, `SMTP_PORT`, `SMTP_EMAIL`, `SMTP_PASSWORD`, `SMTP_TIMEOUT_SECONDS`, `PASSWORD_RESET_TOKEN_EXPIRE_MINUTES` | Required in production for password recovery and by the delivery worker. SMTP defaults to Gmail on port 587, the request timeout defaults to 30 seconds, and reset tokens default to 15 minutes. Reset-delivery failures produce a safe server error log without the account identity. |
+| SMTP | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_EMAIL`, `SMTP_PASSWORD`, `SMTP_TIMEOUT_SECONDS`, `PASSWORD_RESET_TOKEN_EXPIRE_MINUTES` | Shared STARTTLS transport for outreach, password recovery, access review, and access decisions. The example targets SMTP2GO on port 2525; its relay username may differ from the verified sender address. The request timeout defaults to 30 seconds, and reset tokens default to 15 minutes. |
 | Frontend | `VITE_API_BASE_URL` | Optional full browser API base; include `/api` unless `API_PREFIX` changes. Development defaults to port 8000 on the page hostname; production defaults to same-origin `/api`. |
 
-Settings and the configured email agent are process-cached. Restart FastAPI
-and all three workers after changing environment values.
+Settings, including SMTP and access-request configuration, and the configured
+email agent are process-cached. Restart FastAPI and all three workers after
+changing environment values.
 
 ## Agent-centric PostgreSQL database
 

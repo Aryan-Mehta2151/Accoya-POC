@@ -65,11 +65,17 @@ class EmailSmtpTests(unittest.TestCase):
             smtp_host="smtp.example.com",
             smtp_port=587,
             smtp_email="sender@example.com",
+            smtp_username=None,
             smtp_password="offline-secret",
             smtp_timeout_seconds=12,
         )
 
-    def _send_with(self, server: FakeSMTP) -> None:
+    def _send_with(
+        self,
+        server: FakeSMTP,
+        *,
+        settings: Settings | None = None,
+    ) -> None:
         with patch.object(
             email_service.smtplib,
             "SMTP",
@@ -81,12 +87,40 @@ class EmailSmtpTests(unittest.TestCase):
                 subject="Accoya technical review",
                 body="Plain-text outreach body.",
                 message_id="<stable-job-id@accoya-outreach.local>",
-                settings=self.settings,
+                settings=settings or self.settings,
             )
         smtp_factory.assert_called_once_with(
             "smtp.example.com",
             587,
             timeout=12,
+        )
+
+    def test_distinct_login_username_does_not_change_sender(self) -> None:
+        settings = self.settings.model_copy(
+            update={"smtp_username": "  relay-user@example.net  "}
+        )
+        server = FakeSMTP()
+
+        self._send_with(server, settings=settings)
+
+        self.assertEqual(
+            server.login_args,
+            ("relay-user@example.net", "offline-secret"),
+        )
+        message, sender, recipients = server.send_args
+        self.assertEqual(sender, "sender@example.com")
+        self.assertEqual(recipients, ["architect@example.com"])
+        self.assertEqual(message["From"], "sender@example.com")
+
+    def test_blank_login_username_falls_back_to_sender(self) -> None:
+        settings = self.settings.model_copy(update={"smtp_username": "  \t "})
+        server = FakeSMTP()
+
+        self._send_with(server, settings=settings)
+
+        self.assertEqual(
+            server.login_args,
+            ("sender@example.com", "offline-secret"),
         )
 
     def test_outreach_uses_tls_login_exact_envelope_and_headers(self) -> None:
@@ -240,6 +274,99 @@ class EmailSmtpTests(unittest.TestCase):
                     "https://app.example.com/reset?token=offline",
                 )
             )
+
+    def test_access_review_uses_configured_sender_and_approver_recipient(self) -> None:
+        observed: dict[str, object] = {}
+
+        def deliver(
+            message: EmailMessage,
+            *,
+            sender_email: str,
+            recipient_email: str,
+            settings: Settings,
+        ) -> None:
+            observed.update(
+                message=message,
+                sender_email=sender_email,
+                recipient_email=recipient_email,
+                settings=settings,
+            )
+
+        with (
+            patch.object(email_service, "get_settings", return_value=self.settings),
+            patch.object(email_service, "_deliver_message", side_effect=deliver),
+        ):
+            sent = email_service.send_access_request_review_email(
+                approver_email="approver@example.com",
+                requester_email="requester@example.com",
+                requester_name="Requesting User",
+                approve_link="https://app.example.com/access/approve?token=offline",
+                reject_link="https://app.example.com/access/reject?token=offline",
+            )
+
+        self.assertTrue(sent)
+        self.assertEqual(observed["sender_email"], "sender@example.com")
+        self.assertEqual(observed["recipient_email"], "approver@example.com")
+        self.assertEqual(observed["message"]["From"], "sender@example.com")
+        self.assertEqual(observed["message"]["To"], "approver@example.com")
+
+    def test_access_decisions_use_configured_sender_and_requester_recipient(
+        self,
+    ) -> None:
+        for approved in (True, False):
+            with self.subTest(approved=approved):
+                observed: dict[str, object] = {}
+
+                def deliver(
+                    message: EmailMessage,
+                    *,
+                    sender_email: str,
+                    recipient_email: str,
+                    settings: Settings,
+                ) -> None:
+                    observed.update(
+                        message=message,
+                        sender_email=sender_email,
+                        recipient_email=recipient_email,
+                        settings=settings,
+                    )
+
+                with (
+                    patch.object(
+                        email_service,
+                        "get_settings",
+                        return_value=self.settings,
+                    ),
+                    patch.object(
+                        email_service,
+                        "_deliver_message",
+                        side_effect=deliver,
+                    ),
+                ):
+                    sent = email_service.send_access_request_decision_email(
+                        recipient_email="requester@example.com",
+                        approved=approved,
+                        reset_link=(
+                            "https://app.example.com/reset?token=offline"
+                            if approved
+                            else None
+                        ),
+                    )
+
+                self.assertTrue(sent)
+                self.assertEqual(observed["sender_email"], "sender@example.com")
+                self.assertEqual(
+                    observed["recipient_email"],
+                    "requester@example.com",
+                )
+                self.assertEqual(
+                    observed["message"]["From"],
+                    "sender@example.com",
+                )
+                self.assertEqual(
+                    observed["message"]["To"],
+                    "requester@example.com",
+                )
 
 
 if __name__ == "__main__":
