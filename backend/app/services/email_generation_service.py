@@ -748,6 +748,23 @@ def _fallback_draft_for_low_context(lead: Lead | None) -> tuple[str, str]:
         if value
     )
     place = location or "your area"
+
+    state_value = (lead.state if lead is not None else None) or ""
+    location_value = (lead.location if lead is not None else None) or ""
+    nl_lead = state_value.strip().upper() == "NL" or ", nl" in location_value.casefold()
+
+    if nl_lead:
+        subject = f"Accoya-kans voor {project}"
+        body = (
+            "Beste,\n\n"
+            f"Ik neem graag contact op over {project} in {place}. "
+            "Accoya kan een sterke match zijn, afhankelijk van de toepassing, prestatie-eisen en planning van het project.\n\n"
+            "Afhankelijk van de toepassing biedt Accoya vaak een sterke combinatie van duurzaamheid, maatvastheid en ontwerpvrijheid. "
+            "Als je wilt, kan ik een korte, gerichte aanbeveling delen zodra we iets meer projectdetails hebben.\n\n"
+            "Met vriendelijke groet,"
+        )
+        return subject, body
+
     subject = f"Accoya opportunity for {project}"
     body = (
         f"Hi,\n\n"

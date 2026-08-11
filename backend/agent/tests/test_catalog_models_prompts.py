@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from pydantic import ValidationError
@@ -19,10 +20,11 @@ from agent.models import (
     EmailDraft,
     GenerationResult,
     GenerationStatus,
+    NormalizedLead,
     ProductSelection,
     SelectionStatus,
 )
-from agent.prompts import PROMPT_VERSION, SYSTEM_PROMPT
+from agent.prompts import PROMPT_VERSION, SYSTEM_PROMPT, build_compose_prompt
 
 
 class CatalogTests(unittest.TestCase):
@@ -186,6 +188,48 @@ class PromptTests(unittest.TestCase):
             self.assertIn(field, SYSTEM_PROMPT)
         for removed in ("lead_evidence_used", "repair_once", "approved_strategy"):
             self.assertNotIn(removed, SYSTEM_PROMPT)
+
+    def test_compose_prompt_adds_dutch_requirement_for_nl_state(self):
+        lead = NormalizedLead(
+            lead_id="lead-nl",
+            state="NL",
+            source_values={"state": "NL"},
+        )
+        selection = ProductSelection(
+            selected_product_family="accoya_wood",
+            selected_application="standard_decking",
+            confidence=0.95,
+            retrieval_query="Accoya decking",
+        )
+
+        prompt = build_compose_prompt(lead, selection, chunks=[])
+        payload = json.loads(prompt)
+
+        self.assertIn(
+            "Write the subject and body in Dutch.",
+            payload["requirements"],
+        )
+
+    def test_compose_prompt_keeps_default_requirements_for_non_nl_state(self):
+        lead = NormalizedLead(
+            lead_id="lead-us",
+            state="OR",
+            source_values={"state": "OR"},
+        )
+        selection = ProductSelection(
+            selected_product_family="accoya_wood",
+            selected_application="standard_decking",
+            confidence=0.95,
+            retrieval_query="Accoya decking",
+        )
+
+        prompt = build_compose_prompt(lead, selection, chunks=[])
+        payload = json.loads(prompt)
+
+        self.assertNotIn(
+            "Write the subject and body in Dutch.",
+            payload["requirements"],
+        )
 
 
 if __name__ == "__main__":

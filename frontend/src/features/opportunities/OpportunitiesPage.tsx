@@ -738,6 +738,7 @@ export function OpportunitiesPage() {
                             <MapPin aria-hidden="true" size={15} />
                             <span>
                               {displayValue(lead.location)}
+                              {lead.state ? " " : null}
                               {lead.state ? <small>{lead.state}</small> : null}
                             </span>
                           </span>

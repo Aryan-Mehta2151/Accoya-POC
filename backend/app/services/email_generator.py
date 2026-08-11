@@ -59,6 +59,12 @@ def build_agent_lead(lead: Lead) -> dict[str, Any]:
         "external_id": lead.external_id,
     }
     payload.update({field: getattr(lead, field) for field in _AGENT_LEAD_FIELDS})
+    if isinstance(lead.raw_data, Mapping):
+        source_state = lead.raw_data.get("state")
+        if source_state is None:
+            source_state = lead.raw_data.get("State")
+        if source_state is not None:
+            payload["source_state"] = source_state
     return payload
 
 

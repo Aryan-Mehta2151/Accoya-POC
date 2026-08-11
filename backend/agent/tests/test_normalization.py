@@ -217,6 +217,27 @@ class NormalizeLeadTests(unittest.TestCase):
         self.assertEqual(lead.tags, [])
         self.assertEqual(lead.contacts[0].email, "morgan@example.com")
 
+    def test_preserves_netherlands_state_codes_for_language_routing(self):
+        lead_from_code = normalize_lead(
+            {
+                "lead_id": "nl-1",
+                "Project": "Canal Renovation",
+                "Location": "Amsterdam, NL",
+                "State": "NL",
+            }
+        )
+        lead_from_name = normalize_lead(
+            {
+                "lead_id": "nl-2",
+                "Project": "Canal Renovation",
+                "Location": "Amsterdam, Netherlands",
+                "State": "Netherlands",
+            }
+        )
+
+        self.assertEqual(lead_from_code.state, "NL")
+        self.assertEqual(lead_from_name.state, "NL")
+
 
 class InferenceTests(unittest.TestCase):
     def test_stage_categories(self):

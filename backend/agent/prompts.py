@@ -81,6 +81,17 @@ def build_compose_prompt(
     nurturing_list = [
         chunk.model_dump(mode="json") for chunk in (nurturing_chunks or [])
     ]
+    language_requirement = _dutch_requirement_for_nl_lead(lead)
+    requirements = [
+        "Return a nonblank subject and body.",
+        "Use two or three short paragraphs and one low-friction CTA.",
+        "Return exactly the selected canonical family/application IDs.",
+        "Use lead facts and KB context without citations or evidence ledgers.",
+        "Follow the email campaign tone, structure, and CTA patterns from nurturing guidelines when provided.",
+        "Adapt messaging based on lead project stage (planning/specification/procurement) from nurturing sequence.",
+    ]
+    if language_requirement:
+        requirements.append(language_requirement)
     return _json(
         {
             "task": "compose_email",
@@ -95,16 +106,30 @@ def build_compose_prompt(
                 else None
             ),
             "nurturing_campaign_guidelines": nurturing_list,
-            "requirements": [
-                "Return a nonblank subject and body.",
-                "Use two or three short paragraphs and one low-friction CTA.",
-                "Return exactly the selected canonical family/application IDs.",
-                "Use lead facts and KB context without citations or evidence ledgers.",
-                "Follow the email campaign tone, structure, and CTA patterns from nurturing guidelines when provided.",
-                "Adapt messaging based on lead project stage (planning/specification/procurement) from nurturing sequence.",
-            ],
+            "requirements": requirements,
         }
     )
+
+
+def _dutch_requirement_for_nl_lead(lead: NormalizedLead) -> str | None:
+    state_candidates = [lead.state, lead.location]
+    for key, value in lead.source_values.items():
+        if isinstance(key, str) and any(
+            token in key.casefold()
+            for token in ("state", "province", "country", "location")
+        ):
+            state_candidates.append(str(value) if value is not None else None)
+
+    if any(_looks_like_netherlands(value) for value in state_candidates):
+        return "Write the subject and body in Dutch."
+    return None
+
+
+def _looks_like_netherlands(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip().casefold()
+    return normalized in {"nl", "nederland", "netherlands", "the netherlands"} or ", nl" in normalized
 
 
 def build_nurturing_route_prompt(

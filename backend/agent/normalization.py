@@ -600,7 +600,15 @@ def _normalize_state(value: Any) -> str | None:
     state_without_zip = re.sub(r"\s+\d{5}(?:-\d{4})?$", "", state).strip()
     if state_without_zip.upper() in _VALID_STATE_CODES:
         return state_without_zip.upper()
-    return _STATE_CODES.get(state_without_zip.casefold())
+    mapped = _STATE_CODES.get(state_without_zip.casefold())
+    if mapped:
+        return mapped
+    lowered = state_without_zip.casefold()
+    if lowered in {"netherlands", "the netherlands", "nederland"}:
+        return "NL"
+    if len(state_without_zip) == 2 and state_without_zip.isalpha():
+        return state_without_zip.upper()
+    return None
 
 
 def normalize_state_code(value: Any) -> str | None:
