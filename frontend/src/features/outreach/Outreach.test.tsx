@@ -22,6 +22,8 @@ const email: Email = {
   recipient_email: 'maya@example.com',
   subject: 'Accoya proposal',
   body: 'Hello Maya',
+  signature: null,
+  rendered_body: 'Hello Maya',
   status: 'pending_review',
   latest_delivery: null,
   has_unknown_delivery: false,

@@ -625,7 +625,10 @@ class PostgresAgentDatabaseTests(unittest.TestCase):
         self.assertEqual(edited.status_code, 200)
         approved = self.client.post(
             f"/api/emails/{current_email_id}/status",
-            json={"status": "approved"},
+            json={
+                "status": "approved",
+                "expected_content_hash": edited.json()["delivery_content_hash"],
+            },
         )
         self.assertEqual(approved.status_code, 200)
 

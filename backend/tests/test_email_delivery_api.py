@@ -79,6 +79,7 @@ class EmailDeliveryApiTests(unittest.TestCase):
         status: EmailStatus = EmailStatus.pending_review,
         recipient_email: str | None = "architect@example.com",
         external_id: str = "api-delivery-lead",
+        signature: str | None = None,
     ) -> str:
         now = datetime.now(timezone.utc)
         with self.session_factory() as db:
@@ -113,6 +114,7 @@ class EmailDeliveryApiTests(unittest.TestCase):
                 recipient_email=recipient_email,
                 subject="Generated subject",
                 body="Generated body",
+                signature=signature,
                 status=status,
             )
             db.add(email)
@@ -294,10 +296,15 @@ class EmailDeliveryApiTests(unittest.TestCase):
     def test_review_actor_is_always_the_authenticated_user(self) -> None:
         self._authorize()
         email_id = self._seed_email()
+        preview = self.client.get(f"/api/emails/{email_id}").json()
 
         response = self.client.post(
             f"/api/emails/{email_id}/status",
-            json={"status": "approved", "actor": "spoofed-client"},
+            json={
+                "status": "approved",
+                "expected_content_hash": preview["delivery_content_hash"],
+                "actor": "spoofed-client",
+            },
         )
 
         self.assertEqual(response.status_code, 200)
@@ -312,6 +319,60 @@ class EmailDeliveryApiTests(unittest.TestCase):
                 .limit(1)
             )
             self.assertEqual(event.actor, str(self.user.id))
+
+    def test_signature_edit_changes_preview_hash_and_requires_fresh_approval(self) -> None:
+        self._authorize()
+        email_id = self._seed_email(signature="Original signature")
+        original = self.client.get(f"/api/emails/{email_id}").json()
+        self.assertEqual(
+            original["rendered_body"],
+            "Generated body\n\nOriginal signature",
+        )
+
+        edited = self.client.patch(
+            f"/api/emails/{email_id}",
+            json={"signature": "Updated signature"},
+        )
+        self.assertEqual(edited.status_code, 200)
+        self.assertEqual(edited.json()["signature"], "Updated signature")
+        self.assertEqual(
+            edited.json()["rendered_body"],
+            "Generated body\n\nUpdated signature",
+        )
+        self.assertNotEqual(
+            edited.json()["delivery_content_hash"],
+            original["delivery_content_hash"],
+        )
+
+        stale = self.client.post(
+            f"/api/emails/{email_id}/status",
+            json={
+                "status": "approved",
+                "expected_content_hash": original["delivery_content_hash"],
+            },
+        )
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json()["detail"]["code"], "content_changed")
+
+        approved = self.client.post(
+            f"/api/emails/{email_id}/status",
+            json={
+                "status": "approved",
+                "expected_content_hash": edited.json()["delivery_content_hash"],
+            },
+        )
+        self.assertEqual(approved.status_code, 200)
+
+    def test_blank_signature_is_stored_as_null(self) -> None:
+        self._authorize()
+        email_id = self._seed_email(signature="Original signature")
+        response = self.client.patch(
+            f"/api/emails/{email_id}",
+            json={"signature": "  \n  "},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["signature"])
+        self.assertEqual(response.json()["rendered_body"], "Generated body")
 
     def test_edit_and_review_require_authentication(self) -> None:
         email_id = self._seed_email()

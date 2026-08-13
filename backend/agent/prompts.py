@@ -17,7 +17,7 @@ from .models import (
 )
 
 
-PROMPT_VERSION = "accoya-email-v2.2.0"
+PROMPT_VERSION = "accoya-email-v2.3.0"
 
 SYSTEM_PROMPT = f"""
 You draft one concise Accoya sales email from one supplied construction lead.
@@ -34,7 +34,8 @@ an explicit low-confidence result with null product fields.
 
 For composition, use only the selected family/application. Write a subject and
 a professional email of two or three short paragraphs with one low-friction
-call to action. Ground project details in the lead and use retrieved chunks as
+call to action. Do not add a sign-off, sender name, contact block, or signature;
+the application adds those separately. Ground project details in the lead and use retrieved chunks as
 optional product and positioning context. Do not invent project facts. Return the
 selected canonical IDs with the email so the workflow can verify the match.
 
@@ -85,6 +86,7 @@ def build_compose_prompt(
     requirements = [
         "Return a nonblank subject and body.",
         "Use two or three short paragraphs and one low-friction CTA.",
+        "Do not add a sign-off, sender name, contact block, or signature.",
         "Return exactly the selected canonical family/application IDs.",
         "Use lead facts and KB context without citations or evidence ledgers.",
         "Follow the email campaign tone, structure, and CTA patterns from nurturing guidelines when provided.",

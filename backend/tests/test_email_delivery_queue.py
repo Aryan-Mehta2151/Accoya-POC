@@ -66,6 +66,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
         recipient_email: str | None = "architect@example.com",
         subject: str = "Accoya technical review",
         body: str = "Would a short technical review be useful?",
+        signature: str | None = None,
     ) -> str:
         now = datetime.now(timezone.utc)
         with self.session_factory() as db:
@@ -102,6 +103,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                 recipient_email=recipient_email,
                 subject=subject,
                 body=body,
+                signature=signature,
                 status=status,
             )
             db.add(email)
@@ -136,6 +138,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                     email.recipient_email,
                     email.subject,
                     email.body,
+                    email.signature,
                 ),
                 acknowledge_duplicate_risk=acknowledge_duplicate_risk,
                 requested_by=self.requester_id,
@@ -190,6 +193,37 @@ class EmailDeliveryQueueTests(unittest.TestCase):
             email_delivery_service.IdempotencyKeyConflictError
         ):
             self._enqueue(second_email_id, key=key)
+
+    def test_signature_is_hashed_and_snapshotted_into_the_delivery_body(self) -> None:
+        email_id = self._seed_email(signature="Doug Gillikin\nAccsys")
+        job_id = self._enqueue(email_id)
+        with self.session_factory() as db:
+            job = db.get(EmailDeliveryJob, job_id)
+            self.assertEqual(
+                job.body_snapshot,
+                "Would a short technical review be useful?\n\n"
+                "Doug Gillikin\nAccsys",
+            )
+            db.get(Email, email_id).signature = "Changed later"
+            db.commit()
+        with self.session_factory() as db:
+            self.assertEqual(
+                db.get(EmailDeliveryJob, job_id).body_snapshot,
+                "Would a short technical review be useful?\n\n"
+                "Doug Gillikin\nAccsys",
+            )
+
+    def test_unsigned_delivery_preserves_the_stored_body_exactly(self) -> None:
+        body = "  Would a short technical review be useful?\n"
+        email_id = self._seed_email(
+            external_id="unsigned-body-compatibility",
+            body=body,
+        )
+        job_id = self._enqueue(email_id)
+
+        with self.session_factory() as db:
+            job = db.get(EmailDeliveryJob, job_id)
+            self.assertEqual(job.body_snapshot, body)
 
     def test_enqueue_requires_current_approved_unchanged_valid_content(self) -> None:
         email_id = self._seed_email(status=EmailStatus.pending_review)

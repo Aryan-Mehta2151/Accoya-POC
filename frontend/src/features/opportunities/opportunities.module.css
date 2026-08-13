@@ -1277,6 +1277,73 @@
   line-height: 1.45;
 }
 
+.addSignatureButton {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0;
+  border: 0;
+  color: var(--color-forest, #174a36);
+  background: transparent;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.addSignatureButton:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.approvalPreview {
+  display: grid;
+  gap: 1rem;
+  max-height: min(60vh, 560px);
+  margin-top: 1.25rem;
+  overflow-y: auto;
+}
+
+.approvalPreview dl {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+}
+
+.approvalPreview dl > div {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+.approvalPreview dt {
+  color: var(--color-muted);
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.approvalPreview dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.approvalPreview pre {
+  padding: 1rem;
+  margin: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card, 12px);
+  color: var(--color-ink);
+  background: var(--color-canvas);
+  font: inherit;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 @keyframes spin {
   to { transform: rotate(360deg); }
 }

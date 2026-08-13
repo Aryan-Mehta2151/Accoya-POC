@@ -106,6 +106,7 @@ export function ConfirmDialog({
   onOpenChange,
   title,
   description,
+  children,
   confirmLabel,
   onConfirm,
   pending = false,
@@ -115,6 +116,7 @@ export function ConfirmDialog({
   onOpenChange: (open: boolean) => void;
   title: string;
   description: string;
+  children?: ReactNode;
   confirmLabel: string;
   onConfirm: () => void;
   pending?: boolean;
@@ -130,6 +132,7 @@ export function ConfirmDialog({
           </Dialog.Close>
           <Dialog.Title>{title}</Dialog.Title>
           <Dialog.Description>{description}</Dialog.Description>
+          {children}
           <div className={styles.dialogActions}>
             <Dialog.Close className='button buttonGhost' disabled={pending}>
               Cancel

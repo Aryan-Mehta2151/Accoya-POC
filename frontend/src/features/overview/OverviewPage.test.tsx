@@ -47,6 +47,8 @@ const email = (overrides: Partial<Email>): Email => ({
   recipient_email: null,
   subject: 'Current email',
   body: 'Body',
+  signature: null,
+  rendered_body: 'Body',
   status: 'approved',
   latest_delivery: null,
   has_unknown_delivery: false,

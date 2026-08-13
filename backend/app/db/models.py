@@ -598,6 +598,7 @@ class Email(Base):
     recipient_email: Mapped[str | None] = mapped_column(Text)
     subject: Mapped[str] = mapped_column(Text, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    signature: Mapped[str | None] = mapped_column(Text)
     status: Mapped[EmailStatus] = mapped_column(
         _EMAIL_STATUS,
         nullable=False,
@@ -665,7 +666,20 @@ class Email(Base):
 
         from app.email_content import email_content_hash
 
-        return email_content_hash(self.recipient_email, self.subject, self.body)
+        return email_content_hash(
+            self.recipient_email,
+            self.subject,
+            self.body,
+            self.signature,
+        )
+
+    @property
+    def rendered_body(self) -> str:
+        '''Expose the exact plain-text message used for preview and delivery.'''
+
+        from app.email_content import render_outreach_body
+
+        return render_outreach_body(self.body, self.signature)
 
 
 class EmailDeliveryJob(Base):

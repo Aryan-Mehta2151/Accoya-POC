@@ -359,18 +359,30 @@ export const api = {
     request<Email>(`/emails/${encodeURIComponent(emailId)}`),
   editEmail: (
     emailId: string,
-    payload: { recipient_email?: string | null; subject?: string; body?: string },
+    payload: {
+      recipient_email?: string | null;
+      subject?: string;
+      body?: string;
+      signature?: string | null;
+    },
   ) =>
     request<Email>(`/emails/${encodeURIComponent(emailId)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
-  setEmailStatus: (emailId: string, status: EmailStatus) =>
+  setEmailStatus: (
+    emailId: string,
+    status: EmailStatus,
+    expectedContentHash?: string,
+  ) =>
     request<Email>(`/emails/${encodeURIComponent(emailId)}/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify({
+        status,
+        ...(expectedContentHash ? { expected_content_hash: expectedContentHash } : {}),
+      }),
     }),
   sendEmail: (
     emailId: string,

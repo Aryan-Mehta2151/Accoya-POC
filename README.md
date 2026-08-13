@@ -437,7 +437,7 @@ earlybid_sync_runs            chat_messages            strategy_documents
 | `earlybid_sync_runs` | One durable scheduled run per reseller/client/local schedule date. Status is `queued`, `running`, `retry_wait`, `succeeded`, or `failed`; the row records its UTC schedule, attempt and lease state, safe error code, next retry time, completion time, and final ingestion/generation counts. It stores no feed payload or contact data. |
 | `email_generation_jobs` | Durable requested work for one lead. A job records its trigger, requested input hash, idempotency key, optional retry link, safe error code, attempt count, and queue/claim/heartbeat/completion timestamps. Status is `queued`, `running`, `generated`, `insufficient_context`, `provider_error`, or `system_error`. A unique idempotency key makes request replay safe, and a PostgreSQL partial unique index allows at most one queued/running job per lead. |
 | `agent_runs` | One durable attempt for one lead, with optional `retry_of_run_id` and nullable unique `email_generation_job_id` for worker-created attempts. Status is `running`, `generated`, `insufficient_context`, `provider_error`, or `system_error`. A run stores the curated-input SHA-256 hash, safe selections/warnings/error code, immutable original draft, prompt/catalog versions, model name, aggregate model/retrieval/token counts, latency, and start/completion times. Database checks enforce the SHA-256 shape, nonnegative telemetry, nurturing numbers 1-7, and valid running/generated/failure terminal shapes. |
-| `emails` | At most one mutable review email for a generated run through a unique, non-null `agent_run_id`. It stores unrestricted subject/body text, the editable optional recipient snapshot, review status, and timestamps. `lead_id` in the existing API response is derived through the run instead of duplicated. |
+| `emails` | At most one mutable review email for a generated run through a unique, non-null `agent_run_id`. It stores unrestricted subject/body text, an optional independently editable plain-text signature, the editable optional recipient snapshot, review status, and timestamps. `lead_id` in the existing API response is derived through the run instead of duplicated. |
 | `email_status_events` | Append-only status history. The generated email starts with a `pending_review` event; later changes store previous/new status, optional actor, and timestamp. Status updates lock the email row so concurrent transitions retain a contiguous audit chain. Same-status requests are no-ops. |
 | `email_delivery_jobs` | Durable outbound work for one approved email. Each job retains the exact confirmed sender, recipient, subject, and body plus idempotency/retry links, stable Message-ID, requester, safe error code, and queue/lease/completion timestamps. Status is `queued`, `running`, `succeeded`, `failed`, or `delivery_unknown`; a partial unique index permits only one queued/running job per email. |
 | `chat_messages` | Existing user/assistant chat history grouped by `session_id`. |
@@ -563,8 +563,8 @@ ID. ORM internals and arbitrary raw feed fields are never added to the prompt.
 | POST | `/api/emails/generate/{lead_id}` | Deprecated compatibility adapter that queues generation |
 | GET | `/api/emails` | List generated review emails |
 | GET | `/api/emails/{email_id}` | Read one email for deep-link compatibility |
-| PATCH | `/api/emails/{email_id}` | Edit the mutable recipient, subject, or body |
-| POST | `/api/emails/{email_id}/status` | Update review status and append an audit event; clients cannot set `sent` |
+| PATCH | `/api/emails/{email_id}` | Edit the mutable recipient, subject, body, or signature |
+| POST | `/api/emails/{email_id}/status` | Update review status and append an audit event; approval requires the previewed content hash and clients cannot set `sent` |
 | POST | `/api/emails/{email_id}/send` | Authenticated, idempotent queueing of real SMTP delivery |
 | POST | `/api/documents/upload` | Upload a strategy document to S3 and save metadata |
 | GET | `/api/documents` | List strategy documents from S3 |
@@ -612,12 +612,22 @@ initially snapshots the opportunity's current contact address into
 changing the lead, and a later feed update never silently retargets an existing
 draft.
 
+New email drafts whose normalized opportunity state is one of the 50 US state
+codes or `DC` receive the fixed Doug Gillikin/Accsys plain-text signature.
+Other drafts start without a signature, but reviewers can add that default or
+write another signature for the individual email. Existing emails are not
+backfilled. The generator omits sign-offs so the signature remains a separate
+reviewable field.
+
 All attempts, including failures, retain durable job/run records; only
 successful generation creates an email. The production endpoints never return
 raw lead data, KB chunks, prompts, or agent telemetry. Human edits update only
 the mutable email, leaving the original generated subject/body on the run
 unchanged. A valid saved recipient and nonblank subject/body are required for
-approval. Editing any of them after approval records a transition back to
+approval; the optional signature may be edited or cleared. Approval opens a
+complete recipient/subject/body/signature preview and submits its content hash,
+so a concurrent edit must be reviewed again. Editing any confirmed content
+after approval records a transition back to
 `pending_review`. Historical, rejected, sent, and actively delivering emails
 remain read-only. Malformed and nonexistent identifiers return stable 404
 responses.
@@ -628,11 +638,12 @@ responses.
 and CSRF header. It accepts a caller-generated UUID idempotency key, the
 current delivery-content SHA-256 hash, and an optional duplicate-risk
 acknowledgement. It returns HTTP 202 with the existing or newly queued delivery
-summary. The current approved email, its saved recipient/subject/body, and the
+summary. The current approved email, its saved recipient/subject/body/signature, and the
 expected hash must still match; FastAPI never contacts SMTP in this request.
 
 Each `email_delivery_jobs` row snapshots the sender, recipient, subject, and
-body that the user confirmed. PostgreSQL locking and a partial unique index
+fully rendered plain-text body plus signature that the user confirmed.
+PostgreSQL locking and a partial unique index
 allow at most one queued/running delivery for an email. Same-key replay for the
 same email returns the original job; reusing that key for another email is a
 conflict. The worker claims with `SKIP LOCKED`, commits and releases locks, and
@@ -705,8 +716,8 @@ npm run build
 ```
 
 The offline suites cover new-only automatic queueing, replay-safe generation
-and delivery queueing, editable/default recipient behavior, approval and
-content-hash rules, definite/unknown fake SMTP outcomes, workspace ordering
+and delivery queueing, editable/default recipient and signature behavior,
+approval-preview and content-hash rules, definite/unknown fake SMTP outcomes, workspace ordering
 and staleness, provider-free worker outcomes, and the rule that API handlers
 never perform provider delivery. Existing ingestion coverage includes
 explicit-ID precedence, deterministic `earlybid-natural-v1` IDs, repeat

@@ -180,7 +180,8 @@ class ContractTests(unittest.TestCase):
 
 class PromptTests(unittest.TestCase):
     def test_system_prompt_is_concise_catalog_and_schema_prompt(self):
-        self.assertEqual(PROMPT_VERSION, "accoya-email-v2.2.0")
+        self.assertEqual(PROMPT_VERSION, "accoya-email-v2.3.0")
+        self.assertIn("Do not add a sign-off", SYSTEM_PROMPT)
         self.assertIn("CATALOG VERSION: 1.0.0", SYSTEM_PROMPT)
         for family in ("Accoya Wood", "Accoya Color Grey", "Tricoya Panels"):
             self.assertIn(family, SYSTEM_PROMPT)

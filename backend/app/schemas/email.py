@@ -13,7 +13,7 @@ from pydantic import (
 )
 
 from app.db.models import EmailStatus
-from app.schemas.email_delivery import EmailDeliveryJobRead
+from app.schemas.email_delivery import EmailDeliveryJobRead, Sha256Hex
 
 
 EmailSubject = Annotated[
@@ -36,6 +36,8 @@ class EmailRead(BaseModel):
     # correction; edit and approval validation enforce the sendable shape.
     subject: str
     body: str
+    signature: str | None = None
+    rendered_body: str
     status: EmailStatus
     latest_delivery: EmailDeliveryJobRead | None = None
     has_unknown_delivery: bool = False
@@ -46,12 +48,14 @@ class EmailRead(BaseModel):
 
 class EmailStatusUpdate(BaseModel):
     status: EmailStatus
+    expected_content_hash: Sha256Hex | None = None
 
 
 class EmailEdit(BaseModel):
     recipient_email: EmailStr | None = None
     subject: EmailSubject | None = None
     body: str | None = None
+    signature: str | None = None
 
     @field_validator('recipient_email', mode='before')
     @classmethod
@@ -59,6 +63,14 @@ class EmailEdit(BaseModel):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator('signature')
+    @classmethod
+    def blank_signature_clears_value(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
 
 class EmailGenerationErrorDetail(BaseModel):

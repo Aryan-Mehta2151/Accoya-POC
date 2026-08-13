@@ -232,6 +232,7 @@ def enqueue_delivery(
         email.recipient_email,
         email.subject,
         email.body,
+        email.signature,
     )
     if expected_content_hash.strip().lower() != actual_hash:
         raise EmailDeliveryConflictError(
@@ -268,7 +269,7 @@ def enqueue_delivery(
         sender_email=sender,
         recipient_email=recipient,
         subject=email.subject,
-        body_snapshot=email.body,
+        body_snapshot=email.rendered_body,
         attempt_count=0,
     )
     db.add(job)

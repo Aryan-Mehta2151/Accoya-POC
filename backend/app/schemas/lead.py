@@ -90,6 +90,7 @@ class LeadListRead(LeadRead):
 class LeadWorkspaceRead(BaseModel):
     lead: LeadRead
     emails: list[EmailRead]
+    default_email_signature: str
     current_email_id: str | None = None
     current_email_is_stale: bool = False
     latest_generation: EmailGenerationJobRead | None = None

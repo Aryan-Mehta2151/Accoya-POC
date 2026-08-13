@@ -32,6 +32,7 @@ from app.db.models import (
     EmailStatusEvent,
     Lead,
 )
+from app.email_signature import default_signature_for_state
 from app.services.agent_run_service import hash_curated_input
 from app.services.email_generator import EmailAgent, build_agent_lead
 
@@ -96,6 +97,7 @@ class ClaimedEmailGeneration:
     lead_id: str
     curated_input: dict[str, Any]
     recipient_email: str | None
+    signature: str | None
 
 
 def enqueue_initial_generations(
@@ -315,6 +317,9 @@ def ensure_low_context_fallback_email(db: Session, lead_id: str) -> bool:
             recipient_email=lead.contact_email if lead is not None else None,
             subject=subject,
             body=body,
+            signature=default_signature_for_state(
+                lead.state if lead is not None else None
+            ),
             status=EmailStatus.pending_review,
         )
     )
@@ -370,6 +375,7 @@ def claim_next_job(
     curated_input = build_agent_lead(lead)
     actual_input_hash = hash_curated_input(curated_input)
     recipient_email = lead.contact_email
+    signature = default_signature_for_state(lead.state)
     stable_job_id = str(job.id)
     stable_lead_id = str(lead.id)
     now = _utc_now()
@@ -418,6 +424,7 @@ def claim_next_job(
         lead_id=stable_lead_id,
         curated_input=curated_input,
         recipient_email=recipient_email,
+        signature=signature,
     )
 
 
@@ -633,6 +640,7 @@ def _finalize_result(
                 recipient_email=claim.recipient_email,
                 subject=draft_subject,
                 body=draft_body,
+                signature=claim.signature,
                 status=EmailStatus.pending_review,
             )
         )
@@ -760,8 +768,7 @@ def _fallback_draft_for_low_context(lead: Lead | None) -> tuple[str, str]:
             f"Ik neem graag contact op over {project} in {place}. "
             "Accoya kan een sterke match zijn, afhankelijk van de toepassing, prestatie-eisen en planning van het project.\n\n"
             "Afhankelijk van de toepassing biedt Accoya vaak een sterke combinatie van duurzaamheid, maatvastheid en ontwerpvrijheid. "
-            "Als je wilt, kan ik een korte, gerichte aanbeveling delen zodra we iets meer projectdetails hebben.\n\n"
-            "Met vriendelijke groet,"
+            "Als je wilt, kan ik een korte, gerichte aanbeveling delen zodra we iets meer projectdetails hebben."
         )
         return subject, body
 
@@ -771,8 +778,7 @@ def _fallback_draft_for_low_context(lead: Lead | None) -> tuple[str, str]:
         f"I wanted to reach out about {project} in {place}. "
         "Accoya may be a strong fit depending on the application, performance requirements, and project timing.\n\n"
         "Depending on the application, Accoya can offer a compelling combination of durability, dimensional stability, and design flexibility. "
-        "If it would be helpful, I can share a short, tailored recommendation once we have a bit more project detail.\n\n"
-        "Best regards,"
+        "If it would be helpful, I can share a short, tailored recommendation once we have a bit more project detail."
     )
     return subject, body
 

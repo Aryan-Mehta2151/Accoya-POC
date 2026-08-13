@@ -113,6 +113,8 @@ export type Email = {
   recipient_email: string | null;
   subject: string;
   body: string;
+  signature: string | null;
+  rendered_body: string;
   status: EmailStatus;
   latest_delivery: EmailDeliveryJob | null;
   has_unknown_delivery: boolean;
@@ -163,6 +165,7 @@ export type EmailGenerationJob = {
 export type LeadWorkspace = {
   lead: Lead;
   emails: Email[];
+  default_email_signature: string;
   current_email_id: string | null;
   current_email_is_stale: boolean;
   latest_generation: EmailGenerationJob | null;

@@ -11,6 +11,7 @@ from app.api.dependencies.auth import get_current_user
 from app.config import get_settings
 from app.db.database import get_db
 from app.db.models import Email, EmailStatus, EmailStatusEvent, User
+from app.email_content import email_content_hash
 from app.schemas.email import EmailEdit, EmailRead, EmailStatusUpdate
 from app.schemas.email_delivery import EmailDeliveryJobRead, EmailDeliveryRequest
 from app.schemas.email_generation import EmailGenerationJobRead
@@ -174,6 +175,11 @@ def edit_email(
     if payload.body is not None and payload.body != email.body:
         email.body = payload.body
         changed = True
+    if "signature" in payload.model_fields_set:
+        signature = payload.signature
+        if signature != email.signature:
+            email.signature = signature
+            changed = True
 
     if changed and email.status is EmailStatus.approved:
         email.status = EmailStatus.pending_review
@@ -228,6 +234,17 @@ def update_status(
         )
     if payload.status is EmailStatus.approved:
         _require_ready_for_approval(email)
+        actual_hash = email_content_hash(
+            email.recipient_email,
+            email.subject,
+            email.body,
+            email.signature,
+        )
+        if payload.expected_content_hash != actual_hash:
+            _raise_conflict(
+                "content_changed",
+                "The email changed after the approval preview was opened",
+            )
 
     email.status = payload.status
     db.add(

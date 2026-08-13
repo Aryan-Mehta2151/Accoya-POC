@@ -37,6 +37,7 @@ from app.db.models import (
     EmailStatusEvent,
     Lead,
 )
+from app.email_signature import DEFAULT_US_EMAIL_SIGNATURE
 from app.services import email_generation_service
 from app.workers import email_generation as email_generation_worker
 
@@ -102,13 +103,19 @@ class EmailGenerationQueueTests(unittest.TestCase):
         Base.metadata.drop_all(self.engine)
         self.engine.dispose()
 
-    def _seed_lead(self, external_id: str = "queue-lead") -> str:
+    def _seed_lead(
+        self,
+        external_id: str = "queue-lead",
+        *,
+        state: str | None = "OR",
+    ) -> str:
         with self.session_factory() as db:
             lead = Lead(
                 source_system="earlybid",
                 external_id=external_id,
                 project="Harbor boardwalk",
                 location="Portland, OR",
+                state=state,
                 signal="Decking specification",
                 summary="Exterior public-realm opportunity.",
                 next_step="Offer a technical review",
@@ -249,9 +256,50 @@ class EmailGenerationQueueTests(unittest.TestCase):
             self.assertEqual(run.total_tokens, 15)
             self.assertEqual(email.subject, agent.subject)
             self.assertEqual(email.recipient_email, "architect@example.test")
+            self.assertEqual(email.signature, DEFAULT_US_EMAIL_SIGNATURE)
             self.assertEqual(email.status, EmailStatus.pending_review)
             self.assertIsNone(event.previous_status)
             self.assertEqual(event.new_status, EmailStatus.pending_review)
+
+    def test_non_us_generated_draft_starts_without_a_signature(self) -> None:
+        lead_id = self._seed_lead("netherlands-signature", state="NL")
+        self._enqueue(lead_id)
+        claim = self._claim("netherlands-worker")
+        with self.session_factory() as db:
+            email_generation_service.execute_claimed_job(
+                db,
+                claim=claim,
+                agent=FakeAgent(),
+            )
+        with self.session_factory() as db:
+            email = db.scalar(
+                select(Email).where(Email.agent_run_id == claim.run_id)
+            )
+            self.assertIsNone(email.signature)
+
+    def test_signature_policy_is_snapshotted_when_generation_is_claimed(self) -> None:
+        lead_id = self._seed_lead("signature-state-race", state="OR")
+        self._enqueue(lead_id)
+        claim = self._claim("signature-state-worker")
+        self.assertEqual(claim.signature, DEFAULT_US_EMAIL_SIGNATURE)
+
+        with self.session_factory() as db:
+            lead = db.get(Lead, lead_id)
+            lead.state = "NL"
+            db.commit()
+
+        with self.session_factory() as db:
+            email_generation_service.execute_claimed_job(
+                db,
+                claim=claim,
+                agent=FakeAgent(),
+            )
+
+        with self.session_factory() as db:
+            email = db.scalar(
+                select(Email).where(Email.agent_run_id == claim.run_id)
+            )
+            self.assertEqual(email.signature, DEFAULT_US_EMAIL_SIGNATURE)
 
     def test_expected_and_unexpected_worker_failures_are_terminal(self) -> None:
         for index, (agent_status, expected_status) in enumerate(
@@ -294,7 +342,11 @@ class EmailGenerationQueueTests(unittest.TestCase):
                         self.assertEqual(fallback.status, EmailStatus.pending_review)
                         self.assertIn("Accoya", fallback.subject)
                         self.assertIn("Depending on the application", fallback.body)
-                        self.assertIn("Best regards", fallback.body)
+                        self.assertNotIn("Best regards", fallback.body)
+                        self.assertEqual(
+                            fallback.signature,
+                            DEFAULT_US_EMAIL_SIGNATURE,
+                        )
                     else:
                         self.assertEqual(email_count, 0)
 
@@ -529,6 +581,7 @@ class EmailGenerationApiTests(unittest.TestCase):
                 external_id=external_id,
                 project="Civic terrace",
                 location="Seattle, WA",
+                state="WA",
                 summary="An exterior timber opportunity.",
                 contact_email="original-recipient@example.test",
                 tags=["terrace"],
@@ -620,7 +673,19 @@ class EmailGenerationApiTests(unittest.TestCase):
         self.assertEqual(workspace.status_code, 200)
         payload = workspace.json()
         self.assertEqual(payload["current_email_id"], first_email_id)
+        self.assertEqual(
+            payload["default_email_signature"],
+            DEFAULT_US_EMAIL_SIGNATURE,
+        )
         self.assertEqual(len(payload["emails"]), 1)
+        self.assertEqual(
+            payload["emails"][0]["signature"],
+            DEFAULT_US_EMAIL_SIGNATURE,
+        )
+        self.assertEqual(
+            payload["emails"][0]["rendered_body"],
+            f"{FakeAgent().body}\n\n{DEFAULT_US_EMAIL_SIGNATURE}",
+        )
         self.assertEqual(
             payload["emails"][0]["recipient_email"],
             "original-recipient@example.test",
