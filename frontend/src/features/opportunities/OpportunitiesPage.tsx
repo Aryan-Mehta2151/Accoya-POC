@@ -23,6 +23,7 @@ import type { EarlyBidSyncRunStatus, EarlyBidSyncStatus, Lead } from "../../type
 import styles from "./opportunities.module.css";
 
 type ScoreSort = "desc" | "asc";
+type OpportunitySort = "score_desc" | "score_asc" | "contact_present" | "contact_missing";
 type OutreachFilter =
   | ""
   | "pending_review"
@@ -43,6 +44,13 @@ const outreachOptions: Array<{ value: OutreachFilter; label: string }> = [
   { value: "generation_issues", label: "Generation issues" },
   { value: "no_email", label: "No email" },
 ];
+
+const sortSummaryLabels: Record<OpportunitySort, string> = {
+  score_desc: "Sorted by score: high to low",
+  score_asc: "Sorted by score: low to high",
+  contact_present: "Sorted by contact: provided first",
+  contact_missing: "Sorted by contact: missing first",
+};
 
 const scoreFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 1,
@@ -242,6 +250,46 @@ function compareScores(a: Lead, b: Lead, direction: ScoreSort) {
   return direction === "desc" ? b.score - a.score : a.score - b.score;
 }
 
+function hasContact(lead: Lead) {
+  return Boolean(lead.contacts?.trim() || lead.contact_email?.trim());
+}
+
+function compareLeads(a: Lead, b: Lead, sort: OpportunitySort) {
+  if (sort === "score_asc") return compareScores(a, b, "asc");
+  if (sort === "score_desc") return compareScores(a, b, "desc");
+
+  const aHasContact = hasContact(a);
+  const bHasContact = hasContact(b);
+  if (aHasContact !== bHasContact) {
+    const contactFirst = sort === "contact_present";
+    return aHasContact === contactFirst ? -1 : 1;
+  }
+  return compareScores(a, b, "desc");
+}
+
+function parseOpportunitySort(value: string | null): OpportunitySort {
+  if (value === "asc") return "score_asc";
+  if (value === "contact_present" || value === "contact_missing") return value;
+  return "score_desc";
+}
+
+function sortQueryValue(sort: OpportunitySort) {
+  if (sort === "score_desc") return "";
+  if (sort === "score_asc") return "asc";
+  return sort;
+}
+
+function sortIcon(activeSort: OpportunitySort, column: "contact" | "score") {
+  if (column === "contact") {
+    if (activeSort === "contact_present") return <ArrowDown aria-hidden="true" size={14} />;
+    if (activeSort === "contact_missing") return <ArrowUp aria-hidden="true" size={14} />;
+  } else {
+    if (activeSort === "score_desc") return <ArrowDown aria-hidden="true" size={14} />;
+    if (activeSort === "score_asc") return <ArrowUp aria-hidden="true" size={14} />;
+  }
+  return <ArrowUpDown aria-hidden="true" size={14} />;
+}
+
 function uniqueOptions(values: Array<string | null>) {
   return [...new Set(values.filter((value): value is string => Boolean(value?.trim())))]
     .sort((a, b) => a.localeCompare(b));
@@ -355,7 +403,7 @@ export function OpportunitiesPage() {
   const outreach: OutreachFilter = outreachOptions.some((option) => option.value === outreachParam)
     ? outreachParam as OutreachFilter
     : "";
-  const scoreSort: ScoreSort = searchParams.get("sort") === "asc" ? "asc" : "desc";
+  const opportunitySort = parseOpportunitySort(searchParams.get("sort"));
 
   const leadsQuery = useQuery({
     queryKey: queryKeys.leads,
@@ -454,8 +502,8 @@ export function OpportunitiesPage() {
       .filter((lead) => !state || lead.state === state)
       .filter((lead) => !timing || lead.timing === timing)
       .filter((lead) => matchesOutreachFilter(lead, outreach))
-      .sort((a, b) => compareScores(a, b, scoreSort));
-  }, [leads, outreach, scoreSort, search, state, timing]);
+      .sort((a, b) => compareLeads(a, b, opportunitySort));
+  }, [leads, opportunitySort, outreach, search, state, timing]);
 
   const updateParam = (name: string, value: string) => {
     const next = new URLSearchParams(searchParams);
@@ -642,16 +690,6 @@ export function OpportunitiesPage() {
               </select>
             </label>
 
-            <button
-              className={styles.sortButton}
-              type="button"
-              onClick={() => updateParam("sort", scoreSort === "desc" ? "asc" : "")}
-              aria-label={`Sort score ${scoreSort === "desc" ? "ascending" : "descending"}`}
-            >
-              {scoreSort === "desc" ? <ArrowDown aria-hidden="true" size={17} /> : <ArrowUp aria-hidden="true" size={17} />}
-              Score {scoreSort === "desc" ? "high to low" : "low to high"}
-            </button>
-
             {hasFilters ? (
               <button className={styles.clearButton} type="button" onClick={clearFilters}>
                 Clear
@@ -664,7 +702,7 @@ export function OpportunitiesPage() {
               <strong>{filteredLeads.length}</strong> of {leads.length} opportunities
             </p>
             <ArrowUpDown aria-hidden="true" size={15} />
-            <span>Sorted by score</span>
+            <span>{sortSummaryLabels[opportunitySort]}</span>
           </div>
 
           {filteredLeads.length === 0 ? (
@@ -687,9 +725,61 @@ export function OpportunitiesPage() {
                       <th scope="col">Project</th>
                       <th scope="col">Location</th>
                       <th scope="col">Timing</th>
-                      <th scope="col">Contact</th>
+                      <th
+                        scope="col"
+                        className={styles.sortableColumn}
+                        aria-sort={opportunitySort === "contact_present"
+                          ? "descending"
+                          : opportunitySort === "contact_missing"
+                            ? "ascending"
+                            : undefined}
+                      >
+                        <button
+                          type="button"
+                          className={styles.columnSortButton}
+                          aria-label={opportunitySort === "contact_present"
+                            ? "Sort contacts with missing first"
+                            : "Sort contacts with provided first"}
+                          onClick={() => updateParam(
+                            "sort",
+                            sortQueryValue(
+                              opportunitySort === "contact_present"
+                                ? "contact_missing"
+                                : "contact_present",
+                            ),
+                          )}
+                        >
+                          Contact
+                          {sortIcon(opportunitySort, "contact")}
+                        </button>
+                      </th>
                       <th scope="col">Outreach</th>
-                      <th scope="col" className={styles.scoreColumn}>Score</th>
+                      <th
+                        scope="col"
+                        className={`${styles.scoreColumn} ${styles.sortableColumn}`}
+                        aria-sort={opportunitySort === "score_desc"
+                          ? "descending"
+                          : opportunitySort === "score_asc"
+                            ? "ascending"
+                            : undefined}
+                      >
+                        <button
+                          type="button"
+                          className={`${styles.columnSortButton} ${styles.scoreSortButton}`}
+                          aria-label={opportunitySort === "score_desc"
+                            ? "Sort score low to high"
+                            : "Sort score high to low"}
+                          onClick={() => updateParam(
+                            "sort",
+                            sortQueryValue(
+                              opportunitySort === "score_desc" ? "score_asc" : "score_desc",
+                            ),
+                          )}
+                        >
+                          Score
+                          {sortIcon(opportunitySort, "score")}
+                        </button>
+                      </th>
                     </tr>
                   </thead>
                   <tbody>

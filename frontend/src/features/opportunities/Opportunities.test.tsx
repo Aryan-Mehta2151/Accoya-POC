@@ -258,6 +258,102 @@ describe('Opportunities list', () => {
     await waitFor(() => expect(within(table).getAllByRole('row')).toHaveLength(2));
   });
 
+  it('sorts from the contact and score column headers and clears back to score order', async () => {
+    vi.mocked(api.listLeads).mockResolvedValue([
+      lead({
+        id: 'lead-missing',
+        project: 'Missing Contact Project',
+        score: 99,
+        contacts: null,
+        contact_email: '   ',
+      }),
+      lead({
+        id: 'lead-email',
+        project: 'Email Contact Project',
+        score: 80,
+        contacts: null,
+        contact_email: 'email@example.com',
+      }),
+      lead({
+        id: 'lead-name',
+        project: 'Named Contact Project',
+        score: 60,
+        contacts: 'Taylor Reed',
+        contact_email: null,
+      }),
+    ]);
+    const { user, router } = renderAt('/opportunities');
+    const table = await screen.findByRole('table', { name: 'EarlyBid opportunities' });
+    const rowOrder = () => within(table).getAllByRole('row').slice(1).map((row) => row.getAttribute('aria-label'));
+    const scoreHeader = within(table).getByRole('button', { name: 'Sort score low to high' }).closest('th');
+
+    expect(screen.queryByRole('combobox', { name: 'Sort by' })).not.toBeInTheDocument();
+    expect(scoreHeader).toHaveAttribute('aria-sort', 'descending');
+
+    await user.click(within(table).getByRole('button', { name: 'Sort contacts with provided first' }));
+    expect(router.state.location.search).toBe('?sort=contact_present');
+    expect(rowOrder()).toEqual([
+      'Open opportunity Email Contact Project',
+      'Open opportunity Named Contact Project',
+      'Open opportunity Missing Contact Project',
+    ]);
+    expect(within(table).getByRole('button', { name: 'Sort contacts with missing first' }).closest('th'))
+      .toHaveAttribute('aria-sort', 'descending');
+    expect(scoreHeader).not.toHaveAttribute('aria-sort');
+    expect(screen.getByText('Sorted by contact: provided first')).toBeInTheDocument();
+
+    await user.click(within(table).getByRole('button', { name: 'Sort contacts with missing first' }));
+    expect(router.state.location.search).toBe('?sort=contact_missing');
+    expect(rowOrder()).toEqual([
+      'Open opportunity Missing Contact Project',
+      'Open opportunity Email Contact Project',
+      'Open opportunity Named Contact Project',
+    ]);
+    expect(within(table).getByRole('button', { name: 'Sort contacts with provided first' }).closest('th'))
+      .toHaveAttribute('aria-sort', 'ascending');
+    expect(screen.getByText('Sorted by contact: missing first')).toBeInTheDocument();
+
+    await user.click(within(table).getByRole('button', { name: 'Sort score high to low' }));
+    expect(router.state.location.search).toBe('');
+    expect(rowOrder()).toEqual([
+      'Open opportunity Missing Contact Project',
+      'Open opportunity Email Contact Project',
+      'Open opportunity Named Contact Project',
+    ]);
+
+    await user.click(within(table).getByRole('button', { name: 'Sort score low to high' }));
+    expect(router.state.location.search).toBe('?sort=asc');
+    expect(rowOrder()).toEqual([
+      'Open opportunity Named Contact Project',
+      'Open opportunity Email Contact Project',
+      'Open opportunity Missing Contact Project',
+    ]);
+
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(router.state.location.search).toBe('');
+    expect(rowOrder()).toEqual([
+      'Open opportunity Missing Contact Project',
+      'Open opportunity Email Contact Project',
+      'Open opportunity Named Contact Project',
+    ]);
+    expect(within(table).getByRole('button', { name: 'Sort score low to high' }).closest('th'))
+      .toHaveAttribute('aria-sort', 'descending');
+    expect(screen.getByText('Sorted by score: high to low')).toBeInTheDocument();
+  });
+
+  it('keeps the existing ascending-score URL compatible with the score column header', async () => {
+    renderAt('/opportunities?sort=asc');
+    const table = await screen.findByRole('table', { name: 'EarlyBid opportunities' });
+
+    expect(within(table).getByRole('button', { name: 'Sort score high to low' }).closest('th'))
+      .toHaveAttribute('aria-sort', 'ascending');
+    expect(within(table).getAllByRole('row').slice(1).map((row) => row.getAttribute('aria-label'))).toEqual([
+      'Open opportunity Cedar Library',
+      'Open opportunity Harbour Arts Centre',
+    ]);
+    expect(screen.getByText('Sorted by score: low to high')).toBeInTheDocument();
+  });
+
   it('runs explicit feed sync and CSV import mutations', async () => {
     const { user } = renderAt('/opportunities');
     await screen.findByRole('table');

@@ -143,7 +143,6 @@
 
 .primaryButton,
 .secondaryButton,
-.sortButton,
 .clearButton {
   min-height: 2.75rem;
   border-radius: 0.625rem;
@@ -173,15 +172,13 @@
   transform: translateY(-1px);
 }
 
-.secondaryButton,
-.sortButton {
+.secondaryButton {
   color: var(--color-ink, #17211b);
   background: var(--color-paper, #fbfaf6);
   border-color: rgb(23 33 27 / 16%);
 }
 
-.secondaryButton:hover:not(:disabled),
-.sortButton:hover:not(:disabled) {
+.secondaryButton:hover:not(:disabled) {
   border-color: rgb(23 74 54 / 40%);
   background: #fff;
 }
@@ -198,8 +195,7 @@
 }
 
 .primaryButton:disabled,
-.secondaryButton:disabled,
-.sortButton:disabled {
+.secondaryButton:disabled {
   cursor: wait;
   opacity: 0.6;
   transform: none;
@@ -247,7 +243,7 @@
 .primaryButton:focus-visible,
 .secondaryButton:focus-visible,
 .dangerButton:focus-visible,
-.sortButton:focus-visible,
+.columnSortButton:focus-visible,
 .clearButton:focus-visible,
 .cardLink:focus-visible,
 .projectLink:focus-visible,
@@ -305,10 +301,6 @@
   color: var(--color-ink, #17211b);
   font: inherit;
   font-size: 0.86rem;
-}
-
-.sortButton {
-  white-space: nowrap;
 }
 
 .resultSummary {
@@ -376,6 +368,47 @@
 
 .table th:nth-child(6) {
   width: 8%;
+}
+
+.table .sortableColumn {
+  padding: 0;
+}
+
+.columnSortButton {
+  width: 100%;
+  min-height: 3.1rem;
+  padding: 0.9rem 1.15rem;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+  transition: color 180ms ease, background-color 180ms ease;
+}
+
+.columnSortButton:hover {
+  color: var(--color-forest, #174a36);
+  background: rgb(23 74 54 / 6%);
+}
+
+.columnSortButton svg {
+  flex: 0 0 auto;
+}
+
+.columnSortButton:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline-offset: -4px;
+}
+
+.scoreSortButton {
+  justify-content: flex-end;
+  padding-inline: 0.75rem;
 }
 
 .table td {
@@ -1253,11 +1286,6 @@
     grid-template-columns: minmax(15rem, 1fr) repeat(2, minmax(8rem, 0.4fr));
   }
 
-  .sortButton {
-    grid-column: 1 / span 2;
-    width: fit-content;
-  }
-
   .detailLayout {
     grid-template-columns: minmax(0, 1fr) 19rem;
   }
@@ -1306,11 +1334,6 @@
 
   .searchField {
     grid-column: 1 / -1;
-  }
-
-  .sortButton {
-    grid-column: 1 / -1;
-    width: 100%;
   }
 
   .clearButton {
@@ -1372,7 +1395,6 @@
   }
 
   .searchField,
-  .sortButton,
   .clearButton {
     grid-column: auto;
   }
@@ -1399,7 +1421,7 @@
 @media (prefers-reduced-motion: reduce) {
   .primaryButton,
   .secondaryButton,
-  .sortButton,
+  .columnSortButton,
   .table tbody tr {
     transition: none;
   }
