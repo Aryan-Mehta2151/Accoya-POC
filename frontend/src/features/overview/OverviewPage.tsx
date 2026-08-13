@@ -58,7 +58,7 @@ export function OverviewPage() {
   const documents = documentsQuery.data ?? [];
   const currentEmails = newestEmailsByLead(emails);
   const pending = currentEmails.filter((email) => email.status === 'pending_review');
-  const approved = currentEmails.filter((email) => email.status === 'approved');
+  const sent = currentEmails.filter((email) => email.status === 'sent');
   const topLeads = leads.slice(0, 5);
   const recentEmails = currentEmails.slice(0, 5);
 
@@ -84,7 +84,7 @@ export function OverviewPage() {
       <section className={styles.metrics} aria-label='Workspace summary'>
         <Metric icon={<Target />} label='Opportunities' value={leadsQuery.isError ? '—' : leads.length} tone='forest' />
         <Metric icon={<MailCheck />} label='Needs review' value={emailsQuery.isError ? '—' : pending.length} tone='clay' />
-        <Metric icon={<CircleCheck />} label='Approved' value={emailsQuery.isError ? '—' : approved.length} tone='timber' />
+        <Metric icon={<CircleCheck />} label='Sent' value={emailsQuery.isError ? '—' : sent.length} tone='timber' />
         <Metric icon={<BookOpenText />} label='Strategy docs' value={documentsQuery.isError ? '—' : documents.length} tone='sage' />
       </section>
 

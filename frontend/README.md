@@ -27,7 +27,7 @@ so an old Bearer-token bundle cannot survive the cookie-auth cutover.
 
 ## Product areas
 
-- **Overview** — live opportunity, review, approval, and strategy-document summaries.
+- **Overview** — live opportunity, review, sent-email, and strategy-document summaries.
 - **Opportunities** — local search and filters, EarlyBid sync, CSV import, details, and outreach generation.
 - **Outreach** — recipient/content editing, review, approval, rejection, and durable real-email delivery.
 - **Knowledge Base** — S3-backed strategy-document upload, listing, opening, and deletion.

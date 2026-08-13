@@ -59,15 +59,15 @@ const email = (overrides: Partial<Email>): Email => ({
 afterEach(() => cleanup());
 
 describe('OverviewPage', () => {
-  it('counts and links only the newest email for each opportunity', async () => {
+  it('counts sent emails and links only the newest email for each opportunity', async () => {
     vi.mocked(api.listLeads).mockResolvedValue([
       lead('lead-1', 'Harbour Arts Centre'),
       lead('lead-2', 'Cedar Library'),
     ]);
     vi.mocked(api.listEmails).mockResolvedValue([
-      email({ id: 'email-old', subject: 'Historical pending email', status: 'pending_review', created_at: '2026-07-01T00:00:00Z' }),
-      email({ id: 'email-current' }),
-      email({ id: 'email-2', lead_id: 'lead-2', subject: 'Library email', status: 'pending_review' }),
+      email({ id: 'email-old', subject: 'Historical sent email', status: 'sent', created_at: '2026-07-01T00:00:00Z' }),
+      email({ id: 'email-current', status: 'approved' }),
+      email({ id: 'email-2', lead_id: 'lead-2', subject: 'Library email', status: 'sent' }),
     ]);
     vi.mocked(api.listDocuments).mockResolvedValue([]);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -80,10 +80,10 @@ describe('OverviewPage', () => {
 
     const summary = await screen.findByRole('region', { name: 'Workspace summary' });
     const needsReview = within(summary).getByText('Needs review').closest('article');
-    const approved = within(summary).getByText('Approved').closest('article');
-    expect(within(needsReview!).getByText('1')).toBeInTheDocument();
-    expect(within(approved!).getByText('1')).toBeInTheDocument();
-    expect(screen.queryByText('Historical pending email')).not.toBeInTheDocument();
+    const sent = within(summary).getByText('Sent').closest('article');
+    expect(within(needsReview!).getByText('0')).toBeInTheDocument();
+    expect(within(sent!).getByText('1')).toBeInTheDocument();
+    expect(screen.queryByText('Historical sent email')).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Current email/i })).toHaveAttribute(
       'href',
       '/opportunities/lead-1?email=email-current',
