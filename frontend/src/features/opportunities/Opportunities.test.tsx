@@ -556,7 +556,6 @@ describe('Opportunity email workspace', () => {
       recipient_email: 'alex@example.com',
       subject: updated.subject,
       body: email().body,
-      signature: null,
     }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled());
     await user.click(screen.getByRole('button', { name: 'Approve' }));
@@ -569,69 +568,23 @@ describe('Opportunity email workspace', () => {
     ));
   });
 
-  it('adds the default signature to a blank non-US draft and saves it separately', async () => {
-    const defaultSignature = 'Doug Gillikin\nAccsys Sales Office';
+  it('does not expose signature controls for non-US opportunities', async () => {
     const unsigned = email({ signature: null, rendered_body: email().body });
-    const signed = email({
-      signature: defaultSignature,
-      rendered_body: `${unsigned.body}\n\n${defaultSignature}`,
-    });
     vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({
       lead: lead({ state: 'NL', location: 'Amsterdam' }),
       emails: [unsigned],
-      default_email_signature: defaultSignature,
+      default_email_signature: '',
     }));
-    vi.mocked(api.editEmail)
-      .mockResolvedValueOnce(signed)
-      .mockResolvedValueOnce(unsigned);
     const { user } = renderAt('/opportunities/lead-1');
 
-    const signature = await screen.findByRole('textbox', { name: 'Email signature' });
-    expect(signature).toHaveValue('');
-    await user.click(screen.getByRole('button', { name: 'Add default signature' }));
-    expect(signature).toHaveValue(defaultSignature);
-    expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled();
+    await screen.findByRole('textbox', { name: 'Message' });
+    expect(screen.queryByRole('textbox', { name: 'Email signature' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /add default signature/i })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Save changes' }));
-    await waitFor(() => expect(api.editEmail).toHaveBeenCalledWith('email-1', {
-      recipient_email: unsigned.recipient_email,
-      subject: unsigned.subject,
-      body: unsigned.body,
-      signature: defaultSignature,
-    }));
-
-    await user.clear(signature);
-    await user.click(screen.getByRole('button', { name: 'Save changes' }));
-    await waitFor(() => expect(api.editEmail).toHaveBeenLastCalledWith('email-1', {
-      recipient_email: unsigned.recipient_email,
-      subject: unsigned.subject,
-      body: unsigned.body,
-      signature: null,
-    }));
-  });
-
-  it('previews the complete saved body and signature before approval', async () => {
-    const signature = 'Doug Gillikin\nAccsys';
-    const signed = email({
-      signature,
-      rendered_body: `${email().body}\n\n${signature}`,
-    });
-    vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({ emails: [signed] }));
-    vi.mocked(api.setEmailStatus).mockResolvedValue({ ...signed, status: 'approved' });
-    const { user } = renderAt('/opportunities/lead-1');
-
-    await user.click(await screen.findByRole('button', { name: 'Approve' }));
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText('alex@example.com')).toBeInTheDocument();
-    expect(within(dialog).getByText(signed.subject)).toBeInTheDocument();
-    expect(dialog.querySelector('pre')?.textContent).toBe(signed.rendered_body);
-
-    await user.click(within(dialog).getByRole('button', { name: 'Confirm approval' }));
-    await waitFor(() => expect(api.setEmailStatus).toHaveBeenCalledWith(
-      signed.id,
-      'approved',
-      signed.delivery_content_hash,
-    ));
+    expect(dialog.querySelector('pre')?.textContent).toBe(unsigned.rendered_body);
   });
 
   it('closes a stale approval preview and refreshes the workspace', async () => {
@@ -671,7 +624,6 @@ describe('Opportunity email workspace', () => {
       recipient_email: 'reviewer@example.com',
       subject: withoutRecipient.subject,
       body: withoutRecipient.body,
-      signature: null,
     }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled());
   });
@@ -693,7 +645,6 @@ describe('Opportunity email workspace', () => {
       recipient_email: null,
       subject: email().subject,
       body: email().body,
-      signature: null,
     }));
   });
 

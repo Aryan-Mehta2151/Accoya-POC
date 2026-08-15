@@ -26,6 +26,7 @@ from app.db.models import (
     Lead,
 )
 from app.email_content import email_content_hash
+from app.email_signature import effective_signature_for_state
 from app.services import email_service
 
 
@@ -228,11 +229,15 @@ def enqueue_delivery(
             "A nonblank email body is required",
         )
 
+    effective_signature = effective_signature_for_state(
+        email.signature,
+        email.agent_run.lead.state,
+    )
     actual_hash = email_content_hash(
         email.recipient_email,
         email.subject,
         email.body,
-        email.signature,
+        effective_signature,
     )
     if expected_content_hash.strip().lower() != actual_hash:
         raise EmailDeliveryConflictError(

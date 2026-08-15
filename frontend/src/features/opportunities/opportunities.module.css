@@ -1297,6 +1297,91 @@
   text-underline-offset: 0.2em;
 }
 
+.signaturePreview {
+  margin-top: 0.8rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.signaturePreview > strong {
+  color: rgb(23 33 27 / 72%);
+  font-size: 0.7rem;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.signaturePreviewCard {
+  padding: 0.95rem;
+  border: 1px solid rgb(23 33 27 / 12%);
+  border-radius: 0.7rem;
+  background: #fff;
+  color: var(--color-ink, #17211b);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.signaturePreviewCard > p {
+  margin: 0 0 0.75rem;
+  white-space: pre-wrap;
+}
+
+.signaturePreviewCard > p:last-of-type {
+  margin-bottom: 0;
+}
+
+.signaturePreviewMuted {
+  color: rgb(23 33 27 / 52%);
+}
+
+.signatureBlockPreview {
+  margin-top: 1rem;
+  padding-top: 0.85rem;
+  border-left: 4px solid #0f766e;
+  padding-left: 0.85rem;
+  background: linear-gradient(90deg, rgb(15 118 110 / 4%), transparent 42%);
+  position: relative;
+}
+
+.signatureBlockPreview::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 44px;
+  height: 2px;
+  background: #5f6b66;
+}
+
+.signatureNamePreview {
+  color: #0f172a;
+  font-size: 1.1rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.signatureTitlePreview {
+  margin-top: 0.3rem;
+  color: #64748b;
+  font-size: 0.67rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.signatureCompanyPreview {
+  margin-top: 0.18rem;
+  color: #0f766e;
+  font-size: 0.82rem;
+  font-weight: 780;
+}
+
+.signatureLinePreview {
+  color: #475569;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
 .approvalPreview {
   display: grid;
   gap: 1rem;

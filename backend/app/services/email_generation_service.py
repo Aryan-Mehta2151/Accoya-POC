@@ -759,7 +759,20 @@ def _fallback_draft_for_low_context(lead: Lead | None) -> tuple[str, str]:
 
     state_value = (lead.state if lead is not None else None) or ""
     location_value = (lead.location if lead is not None else None) or ""
-    nl_lead = state_value.strip().upper() == "NL" or ", nl" in location_value.casefold()
+    raw_state_value = ""
+    if lead is not None and isinstance(lead.raw_data, dict):
+        raw_state = lead.raw_data.get("state")
+        if raw_state is None:
+            raw_state = lead.raw_data.get("State")
+        if raw_state is not None:
+            raw_state_value = str(raw_state)
+
+    nl_lead = any(
+        value.strip().casefold() in {"nl", "netherlands", "the netherlands", "nederland"}
+        or ", nl" in value.casefold()
+        for value in (state_value, location_value, raw_state_value)
+        if isinstance(value, str)
+    )
 
     if nl_lead:
         subject = f"Accoya-kans voor {project}"

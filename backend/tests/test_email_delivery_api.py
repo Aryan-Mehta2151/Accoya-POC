@@ -79,6 +79,7 @@ class EmailDeliveryApiTests(unittest.TestCase):
         status: EmailStatus = EmailStatus.pending_review,
         recipient_email: str | None = "architect@example.com",
         external_id: str = "api-delivery-lead",
+        state: str | None = None,
         signature: str | None = None,
     ) -> str:
         now = datetime.now(timezone.utc)
@@ -87,6 +88,7 @@ class EmailDeliveryApiTests(unittest.TestCase):
                 source_system="earlybid",
                 external_id=external_id,
                 project="Harbor boardwalk",
+                state=state,
                 contact_email=recipient_email,
                 raw_data={},
             )
@@ -322,7 +324,7 @@ class EmailDeliveryApiTests(unittest.TestCase):
 
     def test_signature_edit_changes_preview_hash_and_requires_fresh_approval(self) -> None:
         self._authorize()
-        email_id = self._seed_email(signature="Original signature")
+        email_id = self._seed_email(state="OR", signature="Original signature")
         original = self.client.get(f"/api/emails/{email_id}").json()
         self.assertEqual(
             original["rendered_body"],

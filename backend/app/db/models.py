@@ -28,6 +28,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
+from app.email_signature import effective_signature_for_state
 
 
 def _uuid() -> str:
@@ -666,11 +667,15 @@ class Email(Base):
 
         from app.email_content import email_content_hash
 
+        signature = effective_signature_for_state(
+            self.signature,
+            self.agent_run.lead.state,
+        )
         return email_content_hash(
             self.recipient_email,
             self.subject,
             self.body,
-            self.signature,
+            signature,
         )
 
     @property
@@ -679,7 +684,11 @@ class Email(Base):
 
         from app.email_content import render_outreach_body
 
-        return render_outreach_body(self.body, self.signature)
+        signature = effective_signature_for_state(
+            self.signature,
+            self.agent_run.lead.state,
+        )
+        return render_outreach_body(self.body, signature)
 
 
 class EmailDeliveryJob(Base):

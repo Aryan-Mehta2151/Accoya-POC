@@ -8,7 +8,6 @@ import {
   History,
   LoaderCircle,
   Mail,
-  Plus,
   RotateCcw,
   Save,
   Send,
@@ -16,7 +15,7 @@ import {
   UserRound,
   X,
 } from 'lucide-react';
-import { useForm, useWatch } from 'react-hook-form';
+import { useForm } from 'react-hook-form';
 import { Link, useBeforeUnload, useBlocker, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 
@@ -41,7 +40,6 @@ type EmailForm = {
   recipient_email: string;
   subject: string;
   body: string;
-  signature: string;
 };
 
 type StatusChange = {
@@ -176,13 +174,10 @@ export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
     register,
     handleSubmit,
     reset,
-    setValue,
-    control,
     formState: { errors, isDirty },
   } = useForm<EmailForm>({
-    defaultValues: { recipient_email: '', subject: '', body: '', signature: '' },
+    defaultValues: { recipient_email: '', subject: '', body: '' },
   });
-  const currentSignature = useWatch({ control, name: 'signature' });
 
   const selectEmail = useCallback((emailId: string, replace = false) => {
     const next = new URLSearchParams(searchParams);
@@ -236,7 +231,6 @@ export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
         recipient_email: selectedEmail.recipient_email ?? '',
         subject: selectedEmail.subject ?? '',
         body: normalizeEmailBody(selectedEmail.body),
-        signature: selectedEmail.signature ?? '',
       });
     }
   }, [isDirty, reset, selectedEmail]);
@@ -313,7 +307,6 @@ export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
       recipient_email: values.recipient_email.trim() || null,
       subject: values.subject.trim(),
       body: normalizeEmailBody(values.body),
-      signature: values.signature.trim() || null,
     }),
     onSuccess: (updated) => {
       const requiresReapproval = selectedEmail?.status === 'approved' && updated.status === 'pending_review';
@@ -325,7 +318,6 @@ export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
         recipient_email: updated.recipient_email ?? '',
         subject: updated.subject ?? '',
         body: normalizeEmailBody(updated.body),
-        signature: updated.signature ?? '',
       });
       toast.success(requiresReapproval ? 'Changes saved; approval required again' : 'Changes saved');
       if (workspace.current_email_id && workspace.current_email_id !== updated.id) {
@@ -685,30 +677,6 @@ export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
                 />
                 {errors.body && <small role='alert'>{errors.body.message}</small>}
               </label>
-
-              <div className={outreachStyles.field}>
-                <span>Email signature</span>
-                <textarea
-                  aria-label='Email signature'
-                  rows={10}
-                  readOnly={isReadOnly}
-                  placeholder='No signature added'
-                  {...register('signature')}
-                />
-                {!isReadOnly && !currentSignature.trim() ? (
-                  <button
-                    className={styles.addSignatureButton}
-                    type='button'
-                    onClick={() => setValue(
-                      'signature',
-                      workspace.default_email_signature,
-                      { shouldDirty: true },
-                    )}
-                  >
-                    <Plus aria-hidden='true' size={15} /> Add default signature
-                  </button>
-                ) : null}
-              </div>
 
               {saveMutation.error ? (
                 <p className={outreachStyles.inlineError} role='alert'>

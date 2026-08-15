@@ -8,8 +8,10 @@ import ssl
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
+from html import escape
 
 from app.config import Settings, get_settings
+from app.email_signature import DEFAULT_US_EMAIL_SIGNATURE, signature_html_for
 
 
 class EmailDeliveryFailure(RuntimeError):
@@ -50,7 +52,7 @@ def send_outreach_email(
     message_id: str,
     settings: Settings | None = None,
 ) -> None:
-    """Deliver one plain-text outreach message or raise a typed outcome."""
+    """Deliver one outreach message with plain text and styled HTML."""
 
     configured = settings or get_settings()
     if not smtp_is_configured(configured):
@@ -66,6 +68,10 @@ def send_outreach_email(
         message["Date"] = format_datetime(datetime.now(timezone.utc))
         message["Message-ID"] = message_id
         message.set_content(body)
+        message.add_alternative(
+            _render_outreach_html(body),
+            subtype="html",
+        )
     except (TypeError, ValueError) as exc:
         raise EmailDeliveryFailure("invalid_email_message") from exc
 
@@ -74,6 +80,58 @@ def send_outreach_email(
         sender_email=sender_email.strip(),
         recipient_email=recipient_email.strip(),
         settings=configured,
+    )
+
+
+def _render_outreach_html(body: str) -> str:
+    """Render a safe HTML version of the approved outreach content.
+
+    The stored body remains the canonical plain text; this only affects how the
+    message is displayed by HTML-capable clients. Only the known US signature
+    is replaced by a structured HTML signature block.
+    """
+
+    normalized = body.replace("\r\n", "\n")
+
+    signature_html = ""
+    message_text = normalized
+    marker = DEFAULT_US_EMAIL_SIGNATURE.strip()
+    index = normalized.rfind(marker)
+    if index != -1:
+        structured = signature_html_for(marker)
+        if structured is not None:
+            signature_html = structured
+            message_text = normalized[:index]
+
+    text_lines = [line.rstrip() for line in message_text.split("\n")]
+    while text_lines and not text_lines[-1]:
+        text_lines.pop()
+
+    blocks: list[list[str]] = []
+    current_block: list[str] = []
+    for line in text_lines:
+        if line:
+            current_block.append(line)
+            continue
+        if current_block:
+            blocks.append(current_block)
+            current_block = []
+    if current_block:
+        blocks.append(current_block)
+
+    body_html_parts = []
+    for paragraph in blocks:
+        paragraph_html = "<br>".join(escape(line) for line in paragraph)
+        body_html_parts.append(
+            f"<p style=\"margin:0 0 16px;\">{paragraph_html}</p>"
+        )
+
+    body_html = "".join(body_html_parts)
+    return (
+        "<html><body style=\"margin:0;padding:0;background:#ffffff;\">"
+        "<div style=\"font-family:Segoe UI,Arial,sans-serif;font-size:15px;line-height:1.65;color:#1f2937;\">"
+        f"{body_html}{signature_html}"
+        "</div></body></html>"
     )
 
 

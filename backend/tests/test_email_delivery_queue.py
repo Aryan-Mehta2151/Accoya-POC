@@ -27,7 +27,6 @@ from app.db.models import (
     EmailStatusEvent,
     Lead,
 )
-from app.email_content import email_content_hash
 from app.services import email_delivery_service, email_service
 from app.workers import email_delivery as email_delivery_worker
 
@@ -62,6 +61,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
         self,
         *,
         external_id: str = "delivery-lead",
+        state: str | None = None,
         status: EmailStatus = EmailStatus.approved,
         recipient_email: str | None = "architect@example.com",
         subject: str = "Accoya technical review",
@@ -75,6 +75,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                 external_id=external_id,
                 project="Harbor boardwalk",
                 location="Portland, OR",
+                state=state,
                 contact_email=recipient_email,
                 raw_data={},
                 source_feed="test/feed",
@@ -134,12 +135,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                 email_id=email_id,
                 idempotency_key=key or str(uuid.uuid4()),
                 expected_content_hash=expected_hash
-                or email_content_hash(
-                    email.recipient_email,
-                    email.subject,
-                    email.body,
-                    email.signature,
-                ),
+                or email.delivery_content_hash,
                 acknowledge_duplicate_risk=acknowledge_duplicate_risk,
                 requested_by=self.requester_id,
                 sender_email=self.settings.smtp_email,
@@ -195,7 +191,10 @@ class EmailDeliveryQueueTests(unittest.TestCase):
             self._enqueue(second_email_id, key=key)
 
     def test_signature_is_hashed_and_snapshotted_into_the_delivery_body(self) -> None:
-        email_id = self._seed_email(signature="Doug Gillikin\nAccsys")
+        email_id = self._seed_email(
+            state="OR",
+            signature="Doug Gillikin\nAccsys",
+        )
         job_id = self._enqueue(email_id)
         with self.session_factory() as db:
             job = db.get(EmailDeliveryJob, job_id)
@@ -224,6 +223,30 @@ class EmailDeliveryQueueTests(unittest.TestCase):
         with self.session_factory() as db:
             job = db.get(EmailDeliveryJob, job_id)
             self.assertEqual(job.body_snapshot, body)
+
+    def test_us_delivery_auto_appends_default_signature_when_missing(self) -> None:
+        email_id = self._seed_email(
+            external_id="us-auto-signature",
+            state="OR",
+            signature=None,
+        )
+        job_id = self._enqueue(email_id)
+
+        with self.session_factory() as db:
+            job = db.get(EmailDeliveryJob, job_id)
+            self.assertEqual(
+                job.body_snapshot,
+                "Would a short technical review be useful?\n\n"
+                "Doug Gillikin\n"
+                "Specification Manager (Associate AIA)\n"
+                "Accsys\n\n"
+                "Accsys Sales Office\n"
+                "Accoya USA\n"
+                "Building 470,\n"
+                "200 S Wilcox Dr.\n"
+                "Kingsport, TN\n"
+                "37660-5147",
+            )
 
     def test_enqueue_requires_current_approved_unchanged_valid_content(self) -> None:
         email_id = self._seed_email(status=EmailStatus.pending_review)

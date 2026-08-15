@@ -9,6 +9,7 @@ from app.email_signature import (
     DEFAULT_US_EMAIL_SIGNATURE,
     US_STATE_CODES,
     default_signature_for_state,
+    effective_signature_for_state,
     is_us_opportunity_state,
 )
 
@@ -47,6 +48,20 @@ class EmailSignaturePolicyTests(unittest.TestCase):
             "to@example.com", "Subject", "Body", "Signature"
         )
         self.assertNotEqual(without_signature, with_signature)
+
+    def test_effective_signature_falls_back_to_default_for_us_only(self) -> None:
+        self.assertEqual(
+            effective_signature_for_state(None, "OR"),
+            DEFAULT_US_EMAIL_SIGNATURE,
+        )
+        self.assertEqual(
+            effective_signature_for_state(" Custom ", "OR"),
+            " Custom ",
+        )
+        self.assertIsNone(effective_signature_for_state(None, "NL"))
+        self.assertIsNone(
+            effective_signature_for_state("Legacy signature", "NL")
+        )
 
 
 if __name__ == "__main__":

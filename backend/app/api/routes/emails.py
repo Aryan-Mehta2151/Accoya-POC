@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.db.database import get_db
 from app.db.models import Email, EmailStatus, EmailStatusEvent, User
 from app.email_content import email_content_hash
+from app.email_signature import effective_signature_for_state
 from app.schemas.email import EmailEdit, EmailRead, EmailStatusUpdate
 from app.schemas.email_delivery import EmailDeliveryJobRead, EmailDeliveryRequest
 from app.schemas.email_generation import EmailGenerationJobRead
@@ -234,11 +235,15 @@ def update_status(
         )
     if payload.status is EmailStatus.approved:
         _require_ready_for_approval(email)
+        signature = effective_signature_for_state(
+            email.signature,
+            email.agent_run.lead.state,
+        )
         actual_hash = email_content_hash(
             email.recipient_email,
             email.subject,
             email.body,
-            email.signature,
+            signature,
         )
         if payload.expected_content_hash != actual_hash:
             _raise_conflict(

@@ -82,10 +82,10 @@ export function OverviewPage() {
       )}
 
       <section className={styles.metrics} aria-label='Workspace summary'>
-        <Metric icon={<Target />} label='Opportunities' value={leadsQuery.isError ? '—' : leads.length} tone='forest' />
-        <Metric icon={<MailCheck />} label='Needs review' value={emailsQuery.isError ? '—' : pending.length} tone='clay' />
-        <Metric icon={<CircleCheck />} label='Sent' value={emailsQuery.isError ? '—' : sent.length} tone='timber' />
-        <Metric icon={<BookOpenText />} label='Strategy docs' value={documentsQuery.isError ? '—' : documents.length} tone='sage' />
+        <Metric icon={<Target />} label='Opportunities' value={leadsQuery.isError ? '—' : leads.length} tone='forest' to='/opportunities' />
+        <Metric icon={<MailCheck />} label='Needs review' value={emailsQuery.isError ? '—' : pending.length} tone='clay' to='/opportunities?outreach=pending_review' />
+        <Metric icon={<CircleCheck />} label='Sent' value={emailsQuery.isError ? '—' : sent.length} tone='timber' to='/opportunities?outreach=sent' />
+        <Metric icon={<BookOpenText />} label='Strategy docs' value={documentsQuery.isError ? '—' : documents.length} tone='sage' to='/knowledge' />
       </section>
 
       <div className={styles.grid}>
@@ -154,13 +154,13 @@ export function OverviewPage() {
   );
 }
 
-function Metric({ icon, label, value, tone }: { icon: React.ReactNode; label: string; value: number | string; tone: string }) {
+function Metric({ icon, label, value, tone, to }: { icon: React.ReactNode; label: string; value: number | string; tone: string; to: string }) {
   return (
-    <article className={`${styles.metric} ${styles[tone]}`}>
+    <Link className={`${styles.metric} ${styles[tone]}`} to={to} aria-label={`${label}: ${String(value)}`}>
       <span className={styles.metricIcon} aria-hidden='true'>{icon}</span>
       <strong>{value}</strong>
       <span>{label}</span>
-    </article>
+    </Link>
   );
 }
 

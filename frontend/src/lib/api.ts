@@ -363,7 +363,6 @@ export const api = {
       recipient_email?: string | null;
       subject?: string;
       body?: string;
-      signature?: string | null;
     },
   ) =>
     request<Email>(`/emails/${encodeURIComponent(emailId)}`, {

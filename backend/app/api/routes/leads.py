@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db.database import get_db
 from app.db.models import EmailGenerationTrigger, Lead
-from app.email_signature import DEFAULT_US_EMAIL_SIGNATURE
+from app.email_signature import default_signature_for_state
 from app.schemas.email_generation import (
     EmailGenerationJobRead,
     EmailGenerationRequest,
@@ -167,7 +167,7 @@ def get_lead_workspace(lead_id: str, db: Session = Depends(get_db)):
     return LeadWorkspaceRead(
         lead=lead,
         emails=emails,
-        default_email_signature=DEFAULT_US_EMAIL_SIGNATURE,
+        default_email_signature=default_signature_for_state(lead.state) or "",
         current_email_id=current_email.id if current_email else None,
         current_email_is_stale=email_generation_service.current_email_is_stale(
             lead, current_email

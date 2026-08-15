@@ -85,7 +85,11 @@ class EmailSmtpTests(unittest.TestCase):
                 sender_email="sender@example.com",
                 recipient_email="architect@example.com",
                 subject="Accoya technical review",
-                body="Plain-text outreach body.",
+                body=(
+                    "Hello Team,\n\n"
+                    "Thank you for reviewing the proposal.\n\n"
+                    + email_service.DEFAULT_US_EMAIL_SIGNATURE
+                ),
                 message_id="<stable-job-id@accoya-outreach.local>",
                 settings=settings or self.settings,
             )
@@ -147,9 +151,34 @@ class EmailSmtpTests(unittest.TestCase):
         )
         self.assertIsNotNone(message["Date"])
         self.assertEqual(
-            message.get_content().rstrip("\n"),
-            "Plain-text outreach body.",
+            message.get_body(preferencelist=("plain",)).get_content().rstrip("\n"),
+            (
+                "Hello Team,\n\n"
+                "Thank you for reviewing the proposal.\n\n"
+                + email_service.DEFAULT_US_EMAIL_SIGNATURE
+            ),
         )
+        html_part = message.get_body(preferencelist=("html",))
+        self.assertIsNotNone(html_part)
+        html_body = html_part.get_content()
+        self.assertIn("Doug Gillikin", html_body)
+        self.assertIn("Specification Manager (Associate AIA)", html_body)
+        self.assertIn("Kingsport, TN 37660-5147", html_body)
+        self.assertIn("border-left:4px solid #0f766e", html_body)
+        self.assertIn("width:44px;height:2px;background:#5f6b66", html_body)
+        self.assertIn("Thank you for reviewing the proposal.", html_body)
+
+    def test_unsigned_non_us_body_keeps_its_closing_as_normal_content(self) -> None:
+        html_body = email_service._render_outreach_html(
+            "Beste team,\n\nDank voor uw tijd.\n\nMet vriendelijke groet,"
+        )
+
+        self.assertIn(
+            '<p style="margin:0 0 16px;">Met vriendelijke groet,</p>',
+            html_body,
+        )
+        self.assertNotIn("border-left:4px solid", html_body)
+        self.assertNotIn("width:44px;height:2px", html_body)
 
     def test_authentication_and_connection_failures_are_definite(self) -> None:
         auth_server = FakeSMTP()
