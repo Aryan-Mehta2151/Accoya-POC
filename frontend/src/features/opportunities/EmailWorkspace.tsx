@@ -879,7 +879,7 @@ export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
         onOpenChange={setApprovalPreviewOpen}
         title='Approve this email?'
         description='Review the complete saved message. Confirming will approve exactly this content.'
-        confirmLabel='Confirm approval'
+        confirmLabel='Approve'
         onConfirm={confirmApproval}
         pending={statusMutation.isPending}
       >

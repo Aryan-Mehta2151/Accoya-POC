@@ -20,6 +20,7 @@ from app.schemas.email_generation import (
 from app.schemas.earlybid_sync import EarlyBidSyncStatusRead
 from app.schemas.lead import (
     LeadArchiveResult,
+    LeadContactEdit,
     LeadListRead,
     LeadRead,
     LeadUploadResult,
@@ -176,6 +177,36 @@ def get_lead_workspace(lead_id: str, db: Session = Depends(get_db)):
             db, lead.id
         ),
     )
+
+
+@router.patch("/{lead_id}", response_model=LeadRead)
+def update_lead_contact(
+    lead_id: str,
+    payload: LeadContactEdit,
+    db: Session = Depends(get_db),
+):
+    """Update the editable contact details for an active opportunity."""
+
+    canonical_lead_id = _canonical_lead_id(lead_id)
+    lead = db.scalar(
+        select(Lead)
+        .where(
+            Lead.id == canonical_lead_id,
+            Lead.archived_at.is_(None),
+        )
+        .with_for_update()
+    )
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    changes = payload.model_dump(exclude_unset=True)
+    if "contacts" in changes:
+        lead.contacts = payload.contacts
+    if "contact_email" in changes:
+        lead.contact_email = str(payload.contact_email) if payload.contact_email else None
+    db.commit()
+    db.refresh(lead)
+    return lead
 
 
 @router.post(

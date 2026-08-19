@@ -167,6 +167,8 @@ class EmailSmtpTests(unittest.TestCase):
         self.assertIn("border-left:4px solid #0f766e", html_body)
         self.assertIn("width:44px;height:2px;background:#5f6b66", html_body)
         self.assertIn("Thank you for reviewing the proposal.", html_body)
+        self.assertIn('padding:0 20px', html_body)
+        self.assertNotIn('max-width:600px', html_body)
 
     def test_unsigned_non_us_body_keeps_its_closing_as_normal_content(self) -> None:
         html_body = email_service._render_outreach_html(
@@ -179,6 +181,8 @@ class EmailSmtpTests(unittest.TestCase):
         )
         self.assertNotIn("border-left:4px solid", html_body)
         self.assertNotIn("width:44px;height:2px", html_body)
+        self.assertIn('padding:0 20px', html_body)
+        self.assertNotIn('max-width:600px', html_body)
 
     def test_authentication_and_connection_failures_are_definite(self) -> None:
         auth_server = FakeSMTP()

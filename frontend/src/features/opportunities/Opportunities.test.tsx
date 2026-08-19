@@ -258,6 +258,7 @@ describe('Opportunities list', () => {
     await user.selectOptions(screen.getByRole('combobox', { name: 'Outreach' }), '');
     await waitFor(() => expect(within(table).getAllByRole('row')).toHaveLength(3));
     await user.type(screen.getByPlaceholderText(/Search project/i), 'Cedar');
+    expect(screen.getByPlaceholderText(/Search project/i)).toHaveValue('Cedar');
     await waitFor(() => expect(within(table).getAllByRole('row')).toHaveLength(2));
   });
 

@@ -3,7 +3,7 @@ from datetime import datetime
 import json
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 
 from app.db.models import EmailStatus
 from app.schemas.email import EmailRead
@@ -49,6 +49,19 @@ class LeadRead(BaseModel):
         if isinstance(value, list):
             return ", ".join(str(item) for item in value)
         return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+class LeadContactEdit(BaseModel):
+    contacts: str | None = None
+    contact_email: EmailStr | None = None
+
+    @field_validator("contacts", "contact_email", mode="before")
+    @classmethod
+    def blank_values_clear_fields(cls, value: object) -> object:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        return value
 
 
 class SyncResult(BaseModel):

@@ -13,9 +13,12 @@ import {
   User as UserIcon,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useAuth } from '../hooks/useAuth';
+import { api } from '../lib/api';
+import { queryKeys } from '../lib/queryKeys';
 import styles from './AppShell.module.css';
 
 const NAV_ITEMS = [
@@ -43,6 +46,17 @@ function Brand({ compact = false }: { compact?: boolean }) {
 }
 
 function Navigation({ compact = false, onNavigate }: { compact?: boolean; onNavigate?: () => void }) {
+  const queryClient = useQueryClient();
+
+  const prefetchRoute = (to: string) => {
+    if (to === '/opportunities' || to === '/') {
+      void queryClient.prefetchQuery({ queryKey: queryKeys.leads, queryFn: api.listLeads });
+    }
+    if (to === '/knowledge' || to === '/') {
+      void queryClient.prefetchQuery({ queryKey: queryKeys.documents, queryFn: api.listDocuments });
+    }
+  };
+
   return (
     <nav className={styles.navigation} aria-label='Primary navigation'>
       {NAV_ITEMS.map(({ to, label, icon: Icon, end }) => (
@@ -51,6 +65,8 @@ function Navigation({ compact = false, onNavigate }: { compact?: boolean; onNavi
           to={to}
           end={end}
           onClick={onNavigate}
+          onPointerEnter={() => prefetchRoute(to)}
+          onFocus={() => prefetchRoute(to)}
           title={compact ? label : undefined}
           className={({ isActive }) => `${styles.navItem} ${isActive ? styles.active : ''}`}
         >

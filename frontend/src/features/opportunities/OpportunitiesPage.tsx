@@ -390,6 +390,8 @@ export function OpportunitiesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const [pendingDeleteLead, setPendingDeleteLead] = useState<Lead | null>(null);
+  const [searchInput, setSearchInput] = useState(() => searchParams.get("q") ?? "");
+  const [lastSearchParam, setLastSearchParam] = useState(() => searchParams.get("q") ?? "");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const observedAutomaticSyncRef = useRef<
     { id: string; status: EarlyBidSyncRunStatus } | null | undefined
@@ -404,6 +406,25 @@ export function OpportunitiesPage() {
     ? outreachParam as OutreachFilter
     : "";
   const opportunitySort = parseOpportunitySort(searchParams.get("sort"));
+
+  // Adopt the query value when navigation changes it, without an extra render pass.
+  if (search !== lastSearchParam) {
+    setLastSearchParam(search);
+    setSearchInput(search);
+  }
+
+  useEffect(() => {
+    if (search === searchInput) return;
+    const timeout = window.setTimeout(() => {
+      setSearchParams((current) => {
+        const next = new URLSearchParams(current);
+        if (searchInput) next.set("q", searchInput);
+        else next.delete("q");
+        return next;
+      }, { replace: true });
+    }, 180);
+    return () => window.clearTimeout(timeout);
+  }, [search, searchInput, setSearchParams]);
 
   const leadsQuery = useQuery({
     queryKey: queryKeys.leads,
@@ -496,14 +517,14 @@ export function OpportunitiesPage() {
   const timingOptions = useMemo(() => uniqueOptions(leads.map((lead) => lead.timing)), [leads]);
 
   const filteredLeads = useMemo(() => {
-    const needle = search.trim().toLocaleLowerCase();
+    const needle = searchInput.trim().toLocaleLowerCase();
     return leads
       .filter((lead) => !needle || leadSearchText(lead).includes(needle))
       .filter((lead) => !state || lead.state === state)
       .filter((lead) => !timing || lead.timing === timing)
       .filter((lead) => matchesOutreachFilter(lead, outreach))
       .sort((a, b) => compareLeads(a, b, opportunitySort));
-  }, [leads, opportunitySort, outreach, search, state, timing]);
+  }, [leads, opportunitySort, outreach, searchInput, state, timing]);
 
   const updateParam = (name: string, value: string) => {
     const next = new URLSearchParams(searchParams);
@@ -512,8 +533,11 @@ export function OpportunitiesPage() {
     setSearchParams(next, { replace: true });
   };
 
-  const clearFilters = () => setSearchParams({}, { replace: true });
-  const hasFilters = Boolean(search || state || timing || outreach || searchParams.has("sort"));
+  const clearFilters = () => {
+    setSearchInput("");
+    setSearchParams({}, { replace: true });
+  };
+  const hasFilters = Boolean(searchInput || state || timing || outreach || searchParams.has("sort"));
   const isMutating = syncMutation.isPending || uploadMutation.isPending;
   const automaticSyncActive = automaticSyncIsActive(latestAutomaticRun?.status);
   const manualSyncDisabled = isMutating || automaticSyncActive;
@@ -655,9 +679,9 @@ export function OpportunitiesPage() {
               <Search aria-hidden="true" size={18} />
               <input
                 type="search"
-                value={search}
+                value={searchInput}
                 placeholder="Search project, location, contact or tag"
-                onChange={(event) => updateParam("q", event.target.value)}
+                onChange={(event) => setSearchInput(event.target.value)}
               />
             </label>
 

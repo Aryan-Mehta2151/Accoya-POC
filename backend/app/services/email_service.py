@@ -129,9 +129,11 @@ def _render_outreach_html(body: str) -> str:
     body_html = "".join(body_html_parts)
     return (
         "<html><body style=\"margin:0;padding:0;background:#ffffff;\">"
-        "<div style=\"font-family:Segoe UI,Arial,sans-serif;font-size:15px;line-height:1.65;color:#1f2937;\">"
+        "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" "
+        "style=\"width:100%;border-collapse:collapse;\"><tr><td "
+        "style=\"padding:0 20px;font-family:Segoe UI,Arial,sans-serif;font-size:15px;line-height:1.65;color:#1f2937;\">"
         f"{body_html}{signature_html}"
-        "</div></body></html>"
+        "</td></tr></table></body></html>"
     )
 
 

@@ -342,6 +342,15 @@ export const api = {
   },
   getLeadWorkspace: (leadId: string) =>
     request<LeadWorkspace>(`/leads/${encodeURIComponent(leadId)}/workspace`),
+  updateLeadContact: (
+    leadId: string,
+    payload: { contacts: string; contact_email: string },
+  ) =>
+    request<Lead>(`/leads/${encodeURIComponent(leadId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
   deleteLead: (leadId: string) =>
     request<LeadArchiveResult>(
       `/leads/${encodeURIComponent(leadId)}`,

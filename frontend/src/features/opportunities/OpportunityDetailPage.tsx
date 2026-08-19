@@ -1,11 +1,14 @@
-import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, CalendarDays, ExternalLink, Mail, MapPin } from 'lucide-react';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ArrowLeft, CalendarDays, ExternalLink, Mail, MapPin, Pencil, Save, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { toast } from 'sonner';
 
 import { EmptyState, ErrorState, LoadingState, PageHeader } from '../../components/ui';
 import { api, ApiError } from '../../lib/api';
 import { queryKeys } from '../../lib/queryKeys';
+import type { Lead, LeadWorkspace } from '../../types';
 import { EmailWorkspace } from './EmailWorkspace';
 import styles from './opportunities.module.css';
 
@@ -74,6 +77,103 @@ function Tags({ value }: { value: string | null }) {
     <span className={styles.tagList}>
       {tags.map((tag) => <span className={styles.tag} key={tag}>{tag}</span>)}
     </span>
+  );
+}
+
+function ContactCard({ lead }: { lead: Lead }) {
+  const queryClient = useQueryClient();
+  const [isEditing, setIsEditing] = useState(false);
+  const [contacts, setContacts] = useState(lead.contacts ?? '');
+  const [contactEmail, setContactEmail] = useState(lead.contact_email ?? '');
+
+  const startEditing = () => {
+    setContacts(lead.contacts ?? '');
+    setContactEmail(lead.contact_email ?? '');
+    setIsEditing(true);
+  };
+
+  const saveMutation = useMutation({
+    mutationFn: () => api.updateLeadContact(lead.id, {
+      contacts,
+      contact_email: contactEmail,
+    }),
+    onSuccess: (updatedLead) => {
+      queryClient.setQueryData<LeadWorkspace>(queryKeys.leadWorkspace(updatedLead.id), (current) => (
+        current ? { ...current, lead: updatedLead } : current
+      ));
+      queryClient.setQueryData<Lead[]>(queryKeys.leads, (current) => (
+        current?.map((item) => (item.id === updatedLead.id ? { ...item, ...updatedLead } : item))
+      ));
+      setIsEditing(false);
+      toast.success('Contact information saved');
+    },
+    onError: (error) => {
+      const message = error instanceof ApiError || error instanceof Error
+        ? error.message
+        : 'Please try again in a moment.';
+      toast.error('Could not save contact information', { description: message });
+    },
+  });
+
+  const cancelEditing = () => {
+    setContacts(lead.contacts ?? '');
+    setContactEmail(lead.contact_email ?? '');
+    setIsEditing(false);
+  };
+
+  return (
+    <section className={styles.sideCard} aria-labelledby='contact-heading'>
+      <div className={styles.sideCardHeader}>
+        <div>
+          <p className={styles.sectionEyebrow}>Primary contact</p>
+          <h2 id='contact-heading'>{isEditing ? 'Edit contact' : lead.contacts || 'Contact not provided'}</h2>
+        </div>
+        {!isEditing && (
+          <button className={styles.iconButton} type='button' onClick={startEditing} aria-label='Edit contact information'>
+            <Pencil aria-hidden='true' size={15} />
+          </button>
+        )}
+      </div>
+
+      {isEditing ? (
+        <form
+          className={styles.contactForm}
+          onSubmit={(event) => {
+            event.preventDefault();
+            saveMutation.mutate();
+          }}
+        >
+          <label>
+            <span>Contact name</span>
+            <input value={contacts} onChange={(event) => setContacts(event.target.value)} autoComplete='name' />
+          </label>
+          <label>
+            <span>Email address</span>
+            <input type='email' value={contactEmail} onChange={(event) => setContactEmail(event.target.value)} autoComplete='email' />
+          </label>
+          <div className={styles.contactFormActions}>
+            <button className={styles.primaryButton} type='submit' disabled={saveMutation.isPending}>
+              <Save aria-hidden='true' size={15} /> {saveMutation.isPending ? 'Saving...' : 'Save contact'}
+            </button>
+            <button className={styles.secondaryButton} type='button' onClick={cancelEditing} disabled={saveMutation.isPending}>
+              <X aria-hidden='true' size={15} /> Cancel
+            </button>
+          </div>
+        </form>
+      ) : (
+        <>
+          {lead.contact_email ? (
+            <a className={styles.contactLink} href={`mailto:${lead.contact_email}`}>
+              <Mail aria-hidden='true' size={16} /> {lead.contact_email}
+            </a>
+          ) : <p className={styles.muted}>No email address is available.</p>}
+          <dl className={styles.compactDetails}>
+            <div><dt>Contact name</dt><dd>{textValue(lead.contacts)}</dd></div>
+            <div><dt>Contact email</dt><dd>{textValue(lead.contact_email)}</dd></div>
+          </dl>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -203,19 +303,7 @@ export function OpportunityDetailPage() {
         </main>
 
         <aside className={styles.detailSidebar} aria-label='Opportunity contact'>
-          <section className={styles.sideCard}>
-            <p className={styles.sectionEyebrow}>Primary contact</p>
-            <h2>{lead.contacts || 'Contact not provided'}</h2>
-            {lead.contact_email ? (
-              <a className={styles.contactLink} href={`mailto:${lead.contact_email}`}>
-                <Mail aria-hidden='true' size={16} /> {lead.contact_email}
-              </a>
-            ) : <p className={styles.muted}>No email address is available.</p>}
-            <dl className={styles.compactDetails}>
-              <div><dt>Contacts field</dt><dd>{textValue(lead.contacts)}</dd></div>
-              <div><dt>Contact email</dt><dd>{textValue(lead.contact_email)}</dd></div>
-            </dl>
-          </section>
+          <ContactCard lead={lead} />
         </aside>
       </div>
 
