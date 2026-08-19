@@ -561,7 +561,7 @@ describe('Opportunity email workspace', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled());
     await user.click(screen.getByRole('button', { name: 'Approve' }));
     expect(await screen.findByRole('heading', { name: 'Approve this email?' })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Confirm approval' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(api.setEmailStatus).toHaveBeenCalledWith(
       'email-1',
       'approved',
@@ -598,7 +598,7 @@ describe('Opportunity email workspace', () => {
     const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries');
 
     await user.click(await screen.findByRole('button', { name: 'Approve' }));
-    await user.click(await screen.findByRole('button', { name: 'Confirm approval' }));
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Approve' }));
 
     await waitFor(() => expect(
       screen.queryByRole('heading', { name: 'Approve this email?' }),
@@ -830,7 +830,7 @@ describe('Opportunity email workspace', () => {
     expect(screen.getByText('Delivery status is uncertain')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Send again anyway' })).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Approve' }));
-    await user.click(await screen.findByRole('button', { name: 'Confirm approval' }));
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Approve' }));
     expect(await screen.findByRole('button', { name: 'Send again anyway' })).toBeEnabled();
   });
 
