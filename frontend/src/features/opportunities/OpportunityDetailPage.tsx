@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, CalendarDays, ExternalLink, Mail, MapPin, Pencil, Save, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, CalendarDays, ExternalLink, Mail, MapPin, Pencil, Save, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -80,7 +80,21 @@ function Tags({ value }: { value: string | null }) {
   );
 }
 
-function ContactCard({ lead }: { lead: Lead }) {
+function StringTags({ values }: { values: string[] }) {
+  if (!values.length) return <>Not provided</>;
+  return (
+    <span className={styles.tagList}>
+      {values.map((value) => <span className={styles.tag} key={value}>{value}</span>)}
+    </span>
+  );
+}
+
+function JsonDetails({ value }: { value: Lead['reported'] }) {
+  if (value === null) return <>Not provided</>;
+  return <pre className={styles.jsonValue}>{JSON.stringify(value, null, 2)}</pre>;
+}
+
+function ContactCard({ lead, readOnly = false }: { lead: Lead; readOnly?: boolean }) {
   const queryClient = useQueryClient();
   const [isEditing, setIsEditing] = useState(false);
   const [contacts, setContacts] = useState(lead.contacts ?? '');
@@ -128,7 +142,7 @@ function ContactCard({ lead }: { lead: Lead }) {
           <p className={styles.sectionEyebrow}>Primary contact</p>
           <h2 id='contact-heading'>{isEditing ? 'Edit contact' : lead.contacts || 'Contact not provided'}</h2>
         </div>
-        {!isEditing && (
+        {!isEditing && !readOnly && (
           <button className={styles.iconButton} type='button' onClick={startEditing} aria-label='Edit contact information'>
             <Pencil aria-hidden='true' size={15} />
           </button>
@@ -183,7 +197,7 @@ export function OpportunityDetailPage() {
     queryKey: queryKeys.leadWorkspace(leadId ?? ''),
     queryFn: () => api.getLeadWorkspace(leadId!),
     enabled: Boolean(leadId),
-    refetchInterval: (query) => workIsActive(query.state.data) ? 2000 : false,
+    refetchInterval: (query) => workIsActive(query.state.data) ? 2000 : 60_000,
     retry: (count, error) => !(error instanceof ApiError && error.status === 404) && count < 2,
   });
 
@@ -216,6 +230,7 @@ export function OpportunityDetailPage() {
 
   const workspace = workspaceQuery.data;
   const lead = workspace.lead;
+  const inactive = lead.review_status !== 'active';
   const sourceUrl = safeExternalUrl(lead.url);
 
   return (
@@ -229,6 +244,19 @@ export function OpportunityDetailPage() {
         title={lead.project || 'Untitled opportunity'}
         description={lead.summary || 'Review the available context and outreach for this opportunity.'}
       />
+
+      {inactive ? (
+        <div className={styles.deletedNotice} role='status'>
+          <AlertTriangle aria-hidden='true' size={20} />
+          <div>
+            <strong>Deleted in EarlyBid</strong>
+            <span>
+              Deleted by {lead.deleted_by ?? 'EarlyBid'}
+              {lead.deleted_reasons.length ? `: ${lead.deleted_reasons.join(', ')}` : '. Outreach is read-only.'}
+            </span>
+          </div>
+        </div>
+      ) : null}
 
       <div className={styles.detailHighlights}>
         <div>
@@ -258,6 +286,9 @@ export function OpportunityDetailPage() {
               <DetailItem label='State'>{textValue(lead.state)}</DetailItem>
               <DetailItem label='Timing'>{textValue(lead.timing)}</DetailItem>
               <DetailItem label='Meeting date'>{formatDate(lead.meeting_date)}</DetailItem>
+              <DetailItem label='Due date'>{formatDate(lead.due_date)}</DetailItem>
+              <DetailItem label='Award date'>{formatDate(lead.award_date)}</DetailItem>
+              <DetailItem label='Start date'>{formatDate(lead.start_date)}</DetailItem>
               <DetailItem label='Awarded to'>{textValue(lead.awarded_to)}</DetailItem>
               <DetailItem label='Score'>{lead.score === null ? 'Not provided' : scoreFormatter.format(lead.score)}</DetailItem>
               <DetailItem label='Summary' wide>{textValue(lead.summary)}</DetailItem>
@@ -276,6 +307,11 @@ export function OpportunityDetailPage() {
               <DetailItem label='Intelligence' wide>{textValue(lead.intelligence)}</DetailItem>
               <DetailItem label='Priority reasons' wide>{textValue(lead.priority_reasons)}</DetailItem>
               <DetailItem label='Tags' wide><Tags value={lead.tags} /></DetailItem>
+              <DetailItem label='Keywords matched' wide><StringTags values={lead.keywords_matched} /></DetailItem>
+              <DetailItem label='Reported details' wide><JsonDetails value={lead.reported} /></DetailItem>
+              <DetailItem label='Response deadline evidence' wide>
+                <JsonDetails value={lead.response_deadline_evidence} />
+              </DetailItem>
             </dl>
           </section>
 
@@ -290,6 +326,9 @@ export function OpportunityDetailPage() {
               <DetailItem label='External ID'>{textValue(lead.external_id)}</DetailItem>
               <DetailItem label='Record ID'><span className={styles.monoValue}>{lead.id}</span></DetailItem>
               <DetailItem label='Source feed'>{textValue(lead.source_feed)}</DetailItem>
+              <DetailItem label='EarlyBid status'>{textValue(lead.review_status)}</DetailItem>
+              <DetailItem label='Deleted by'>{textValue(lead.deleted_by)}</DetailItem>
+              <DetailItem label='Deletion reasons' wide><StringTags values={lead.deleted_reasons} /></DetailItem>
               <DetailItem label='Created'>{formatDate(lead.created_at, true)}</DetailItem>
               <DetailItem label='Source URL' wide>
                 {sourceUrl ? (
@@ -303,11 +342,11 @@ export function OpportunityDetailPage() {
         </main>
 
         <aside className={styles.detailSidebar} aria-label='Opportunity contact'>
-          <ContactCard lead={lead} />
+          <ContactCard lead={lead} readOnly={inactive} />
         </aside>
       </div>
 
-      <EmailWorkspace key={lead.id} workspace={workspace} />
+      <EmailWorkspace key={lead.id} workspace={workspace} inactive={inactive} />
     </div>
   );
 }

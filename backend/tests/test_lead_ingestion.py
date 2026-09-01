@@ -19,7 +19,10 @@ from app.db.models import (
     AgentRun,
     AgentRunStatus,
     Email,
+    EmailDeliveryJob,
+    EmailDeliveryJobStatus,
     EmailGenerationJob,
+    EmailGenerationJobStatus,
     EmailGenerationTrigger,
     EmailStatus,
     Lead,
@@ -88,6 +91,37 @@ class LeadRowNormalizationTests(unittest.TestCase):
         self.assertEqual(fields["raw_data"], row)
         self.assertNotIn("id", fields["raw_data"])
         self.assertNotIn("external_id", fields["raw_data"])
+
+    def test_expanded_feed_fields_are_typed_and_raw_values_are_retained(self):
+        row = {
+            "id": "expanded-1",
+            "Project": "Library Terrace",
+            "reported": '{"source":"agenda"}',
+            "due_date": "2026-09-10",
+            "award_date": "2026-10-01",
+            "start_date": "2027-01-15",
+            "response_deadline_evidence": '[{"quote":"Due September 10"}]',
+            "keywords_matched": "decking;public realm",
+            "review_status": "deleted",
+            "deleted_by": "operator",
+            "deleted_reasons": "duplicate;out_of_scope",
+        }
+
+        fields = normalized_row_fields(row, source_feed="reseller/client")
+
+        self.assertEqual(fields["reported"], {"source": "agenda"})
+        self.assertEqual(str(fields["due_date"]), "2026-09-10")
+        self.assertEqual(str(fields["award_date"]), "2026-10-01")
+        self.assertEqual(str(fields["start_date"]), "2027-01-15")
+        self.assertEqual(
+            fields["response_deadline_evidence"],
+            [{"quote": "Due September 10"}],
+        )
+        self.assertEqual(fields["keywords_matched"], ["decking", "public realm"])
+        self.assertEqual(fields["review_status"].value, "deleted")
+        self.assertEqual(fields["deleted_by"], "operator")
+        self.assertEqual(fields["deleted_reasons"], ["duplicate", "out_of_scope"])
+        self.assertEqual(fields["raw_data"], row)
 
 
 class LeadUpsertTests(unittest.TestCase):
@@ -339,6 +373,49 @@ class LeadIngestionApiTests(unittest.TestCase):
             self.assertEqual(job.trigger, EmailGenerationTrigger.csv_upload)
             self.assertEqual(job.idempotency_key, f"initial-v1:{lead_uuid}")
 
+    def test_legacy_17_and_expanded_26_column_feeds_are_compatible(self):
+        original_columns = (
+            "id,Section,Project,Location,State,Signal,Intelligence,Score,Timing,"
+            "Awarded To,Priority Reasons,Summary,Contacts,Meeting Date,Tags,URL,"
+            "Next Step"
+        )
+        legacy_csv = (
+            f"{original_columns}\n"
+            "legacy-17,Public,Legacy Plaza,Portland,OR,Planning,Details,7,Q4,,"
+            "Public project,Summary,Architect,Sep 1 2026,decking,"
+            "https://example.test,Call\n"
+        )
+        legacy = self.client.post(
+            "/api/leads/upload-csv",
+            files={"file": ("legacy.csv", legacy_csv, "text/csv")},
+        )
+        self.assertEqual(legacy.status_code, 200)
+        self.assertEqual(legacy.json()["items"][0]["review_status"], "active")
+
+        expanded_columns = (
+            f"{original_columns},reported,due_date,award_date,start_date,"
+            "response_deadline_evidence,keywords_matched,review_status,deleted_by,"
+            "deleted_reasons"
+        )
+        self.assertEqual(len(expanded_columns.split(",")), 26)
+        expanded_csv = (
+            f"{expanded_columns}\n"
+            "expanded-26,Public,Dismissed Plaza,Salem,OR,Planning,Details,8,Q1,,"
+            "Public project,Summary,Engineer,Oct 1 2026,cladding,"
+            "https://example.test,Review,true,2026-09-10,2026-10-01,2027-01-15,"
+            "[],cladding;facade,deleted,operator,out_of_scope\n"
+        )
+        expanded = self.client.post(
+            "/api/leads/upload-csv",
+            files={"file": ("expanded.csv", expanded_csv, "text/csv")},
+        )
+        self.assertEqual(expanded.status_code, 200)
+        item = expanded.json()["items"][0]
+        self.assertEqual(item["review_status"], "deleted")
+        self.assertEqual(item["due_date"], "2026-09-10")
+        self.assertEqual(item["keywords_matched"], ["cladding", "facade"])
+        self.assertEqual(expanded.json()["generation_queued"], 0)
+
     def test_upload_returns_422_and_stages_nothing_for_an_invalid_row(self):
         csv_text = (
             "Project,Location,State\n"
@@ -424,6 +501,82 @@ class LeadIngestionApiTests(unittest.TestCase):
         )
         self.assertEqual(self._lead_count(), 0)
         self.assertEqual(self._job_count(), 0)
+
+    def test_invalid_expanded_field_aborts_the_upload(self):
+        csv_text = (
+            "id,Project,review_status,due_date\n"
+            "bad-expanded,Invalid Expanded,unknown,09/10/2026\n"
+        )
+
+        response = self.client.post(
+            "/api/leads/upload-csv",
+            files={"file": ("invalid-expanded.csv", csv_text, "text/csv")},
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"]["issues"],
+            [{"row": 2, "reason": "invalid_review_status"}],
+        )
+        self.assertEqual(self._lead_count(), 0)
+        self.assertEqual(self._job_count(), 0)
+
+    def test_malformed_expanded_json_and_date_are_rejected_atomically(self):
+        cases = (
+            ("reported", "{broken", "invalid_reported_json"),
+            ("reported", "NaN", "invalid_reported_json"),
+            ("due_date", "09/10/2026", "invalid_due_date"),
+            ("due_date", "20260910", "invalid_due_date"),
+            ("due_date", "2026-W37-4", "invalid_due_date"),
+        )
+        for column, value, reason in cases:
+            with self.subTest(column=column):
+                csv_text = (
+                    f"id,Project,Location,State,review_status,{column}\n"
+                    f"bad-{column},Invalid Expanded,Portland,OR,active,{value}\n"
+                )
+                response = self.client.post(
+                    "/api/leads/upload-csv",
+                    files={"file": ("invalid-expanded.csv", csv_text, "text/csv")},
+                )
+
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(
+                    response.json()["detail"]["issues"],
+                    [{"row": 2, "reason": reason}],
+                )
+                self.assertEqual(self._lead_count(), 0)
+                self.assertEqual(self._job_count(), 0)
+
+    def test_new_deleted_lead_queues_its_first_draft_only_when_activated(self):
+        deleted_csv = (
+            "id,Project,Location,State,review_status,deleted_by,deleted_reasons\n"
+            "lifecycle-1,Future Active,Portland,OR,deleted,operator,not_ready\n"
+        )
+        deleted = self.client.post(
+            "/api/leads/upload-csv",
+            files={"file": ("deleted.csv", deleted_csv, "text/csv")},
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json()["generation_queued"], 0)
+        self.assertEqual(self.client.get("/api/leads").json(), [])
+        self.assertEqual(len(self.client.get("/api/leads?view=dismissed").json()), 1)
+        self.assertEqual(self._job_count(), 0)
+
+        active_csv = deleted_csv.replace(
+            "deleted,operator,not_ready",
+            "active,,",
+        )
+        active = self.client.post(
+            "/api/leads/upload-csv",
+            files={"file": ("active.csv", active_csv, "text/csv")},
+        )
+        self.assertEqual(active.status_code, 200)
+        self.assertEqual(active.json()["created"], 0)
+        self.assertEqual(active.json()["updated"], 1)
+        self.assertEqual(active.json()["generation_queued"], 1)
+        self.assertEqual(len(self.client.get("/api/leads").json()), 1)
+        self.assertEqual(self._job_count(), 1)
 
     def test_repeated_sync_updates_the_same_idless_lead(self):
         first_csv = (
@@ -515,14 +668,14 @@ class LeadIngestionApiTests(unittest.TestCase):
         self.assertEqual(self._lead_count(), 1)
         self.assertEqual(self._job_count(), 1)
 
-    def test_restored_archived_lead_behaves_like_first_time_pull(self):
-        csv_text = (
-            "Project,Location,State,Score\n"
-            "Fresh Again Opportunity,Portland,OR,8\n"
+    def test_deleted_and_reopened_lead_preserves_outreach_history(self):
+        active_csv = (
+            "Project,Location,State,Score,review_status\n"
+            "Fresh Again Opportunity,Portland,OR,8,active\n"
         )
         first = self.client.post(
             "/api/leads/upload-csv",
-            files={"file": ("first.csv", csv_text, "text/csv")},
+            files={"file": ("first.csv", active_csv, "text/csv")},
         )
         self.assertEqual(first.status_code, 200)
         lead_id = first.json()["items"][0]["id"]
@@ -538,38 +691,76 @@ class LeadIngestionApiTests(unittest.TestCase):
             )
             db.add(run)
             db.flush()
+            email = Email(
+                agent_run_id=run.id,
+                recipient_email="approver@example.test",
+                subject="Reviewed draft",
+                body="Body",
+                status=EmailStatus.approved,
+            )
+            db.add(email)
+            db.flush()
             db.add(
-                Email(
-                    agent_run_id=run.id,
+                EmailDeliveryJob(
+                    email_id=email.id,
+                    requested_by="offline-reviewer",
+                    idempotency_key="queued-before-source-delete",
+                    content_hash="b" * 64,
+                    message_id="<queued-before-source-delete@example.test>",
+                    sender_email="sender@example.test",
                     recipient_email="approver@example.test",
                     subject="Reviewed draft",
-                    body="Body",
-                    status=EmailStatus.approved,
+                    body_snapshot="Body",
                 )
             )
             db.commit()
 
-        before_delete = self.client.get("/api/leads")
-        self.assertEqual(before_delete.status_code, 200)
-        self.assertEqual(before_delete.json()[0]["current_email"]["status"], "approved")
-
-        deleted = self.client.delete(f"/api/leads/{lead_id}")
+        deleted_csv = active_csv.replace(",active\n", ",deleted\n")
+        deleted = self.client.post(
+            "/api/leads/upload-csv",
+            files={"file": ("deleted.csv", deleted_csv, "text/csv")},
+        )
         self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(self.client.get("/api/leads").json(), [])
+        dismissed = self.client.get("/api/leads", params={"view": "dismissed"})
+        self.assertEqual(dismissed.status_code, 200)
+        self.assertEqual(dismissed.json()[0]["id"], lead_id)
+        dismissed_workspace = self.client.get(f"/api/leads/{lead_id}/workspace")
+        self.assertEqual(dismissed_workspace.status_code, 200)
+        self.assertEqual(
+            dismissed_workspace.json()["emails"][0]["status"],
+            "approved",
+        )
+        with self.session_factory() as db:
+            queued = db.scalar(
+                select(EmailGenerationJob).where(
+                    EmailGenerationJob.idempotency_key == f"initial-v1:{lead_id}"
+                )
+            )
+            self.assertEqual(queued.status, EmailGenerationJobStatus.system_error)
+            self.assertEqual(queued.error_code, "lead_inactive")
+            delivery = db.scalar(select(EmailDeliveryJob))
+            self.assertEqual(delivery.status, EmailDeliveryJobStatus.failed)
+            self.assertEqual(delivery.error_code, "lead_inactive")
+            self.assertEqual(delivery.attempt_count, 0)
 
         restored = self.client.post(
             "/api/leads/upload-csv",
-            files={"file": ("restored.csv", csv_text, "text/csv")},
+            files={"file": ("restored.csv", active_csv, "text/csv")},
         )
         self.assertEqual(restored.status_code, 200)
-        self.assertEqual(restored.json()["created"], 1)
-        self.assertEqual(restored.json()["updated"], 0)
-        self.assertEqual(restored.json()["generation_queued"], 1)
+        self.assertEqual(restored.json()["created"], 0)
+        self.assertEqual(restored.json()["updated"], 1)
+        self.assertEqual(restored.json()["generation_queued"], 0)
 
         after_restore = self.client.get("/api/leads")
         self.assertEqual(after_restore.status_code, 200)
         self.assertEqual(len(after_restore.json()), 1)
         self.assertEqual(after_restore.json()[0]["id"], lead_id)
-        self.assertIsNone(after_restore.json()[0]["current_email"])
+        self.assertEqual(
+            after_restore.json()[0]["current_email"]["status"],
+            "approved",
+        )
 
 
 class LeadWireCompatibilityTests(unittest.TestCase):

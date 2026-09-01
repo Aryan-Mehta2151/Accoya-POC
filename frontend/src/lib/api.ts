@@ -7,7 +7,6 @@ import type {
   EmailDeliveryJob,
   EmailGenerationJob,
   EmailStatus,
-  LeadArchiveResult,
   Lead,
   LeadWorkspace,
   StrategyDocument,
@@ -332,7 +331,8 @@ function normalizeChatMessage(raw: unknown): ChatMessage {
 }
 
 export const api = {
-  listLeads: () => request<Lead[]>('/leads'),
+  listLeads: (view: 'active' | 'dismissed' = 'active') =>
+    request<Lead[]>(`/leads?view=${view}`),
   getLeadSyncStatus: () => request<EarlyBidSyncStatus>('/leads/sync-status'),
   syncLeads: () => request<SyncResult>('/leads/sync', { method: 'POST' }),
   uploadLeadsCsv: (file: File) => {
@@ -351,11 +351,6 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
-  deleteLead: (leadId: string) =>
-    request<LeadArchiveResult>(
-      `/leads/${encodeURIComponent(leadId)}`,
-      { method: 'DELETE' },
-    ),
   queueEmailGeneration: (leadId: string, idempotencyKey: string) =>
     request<EmailGenerationJob>(`/leads/${encodeURIComponent(leadId)}/email-generations`, {
       method: 'POST',

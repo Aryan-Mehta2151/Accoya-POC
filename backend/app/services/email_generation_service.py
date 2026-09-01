@@ -31,6 +31,7 @@ from app.db.models import (
     EmailStatus,
     EmailStatusEvent,
     Lead,
+    LeadReviewStatus,
 )
 from app.email_signature import default_signature_for_state
 from app.services.agent_run_service import hash_curated_input
@@ -53,6 +54,7 @@ PROVIDER_TIMEOUT = "provider_timeout"
 AGENT_EXECUTION_FAILED = "agent_execution_failed"
 INVALID_AGENT_RESULT = "invalid_agent_result"
 TERMINAL_PERSISTENCE_FAILED = "terminal_persistence_failed"
+LEAD_INACTIVE = "lead_inactive"
 
 
 class LeadNotFoundError(LookupError):
@@ -110,6 +112,8 @@ def enqueue_initial_generations(
 
     jobs: list[EmailGenerationJob] = []
     for lead in leads:
+        if lead.review_status is not LeadReviewStatus.active:
+            continue
         if lead.id is None:
             raise ValueError("Lead must be flushed before generation is queued")
         job = EmailGenerationJob(
@@ -144,6 +148,21 @@ def enqueue_generation(
     if not key:
         raise ValueError("idempotency_key must not be blank")
 
+    lead = db.scalar(
+        select(Lead)
+        .where(
+            Lead.id == canonical_lead_id,
+        )
+        .with_for_update()
+    )
+    if lead is None:
+        raise LeadNotFoundError(lead_id)
+    if lead.review_status is not LeadReviewStatus.active:
+        raise EmailGenerationConflictError(
+            LEAD_INACTIVE,
+            "EarlyBid has marked this opportunity as deleted",
+        )
+
     existing = db.scalar(
         select(EmailGenerationJob).where(
             EmailGenerationJob.idempotency_key == key
@@ -153,17 +172,6 @@ def enqueue_generation(
         if existing.lead_id != canonical_lead_id:
             raise IdempotencyKeyConflictError(key)
         return existing
-
-    lead = db.scalar(
-        select(Lead)
-        .where(
-            Lead.id == canonical_lead_id,
-            Lead.archived_at.is_(None),
-        )
-        .with_for_update()
-    )
-    if lead is None:
-        raise LeadNotFoundError(lead_id)
 
     active = _latest_job(db, canonical_lead_id, statuses=ACTIVE_JOB_STATUSES)
     if active is not None:
@@ -371,6 +379,12 @@ def claim_next_job(
         # The cascading foreign key should make this unreachable.
         db.rollback()
         raise LeadNotFoundError(job.lead_id)
+    if lead.review_status is not LeadReviewStatus.active:
+        job.status = EmailGenerationJobStatus.system_error
+        job.error_code = LEAD_INACTIVE
+        job.completed_at = _utc_now()
+        db.commit()
+        return None
 
     curated_input = build_agent_lead(lead)
     actual_input_hash = hash_curated_input(curated_input)
@@ -579,6 +593,21 @@ def _finalize_result(
 ) -> EmailGenerationJob:
     job, run = _load_running_job_and_run(db, claim)
     now = _utc_now()
+    # Serialize finalization with feed lifecycle updates. If EarlyBid's deletion
+    # owns the lead lock first, this transaction observes it after waiting and
+    # discards the provider result instead of creating an outreach email.
+    lead = db.scalar(
+        select(Lead)
+        .where(Lead.id == claim.lead_id)
+        .with_for_update()
+    )
+    if lead is None or lead.review_status is not LeadReviewStatus.active:
+        _set_run_system_error(run, code=LEAD_INACTIVE, now=now)
+        job.status = EmailGenerationJobStatus.system_error
+        job.error_code = LEAD_INACTIVE
+        job.completed_at = now
+        db.commit()
+        return job
     telemetry = result.telemetry
     token_usage = telemetry.token_usage
     draft_subject: str | None = None

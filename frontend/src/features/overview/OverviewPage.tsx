@@ -31,7 +31,11 @@ function newestEmailsByLead(emails: Email[]): Email[] {
 }
 
 export function OverviewPage() {
-  const leadsQuery = useQuery({ queryKey: queryKeys.leads, queryFn: api.listLeads });
+  const leadsQuery = useQuery({
+    queryKey: queryKeys.leads,
+    queryFn: () => api.listLeads(),
+    refetchInterval: 60_000,
+  });
   const emailsQuery = useQuery({ queryKey: queryKeys.emails, queryFn: api.listEmails });
   const documentsQuery = useQuery({ queryKey: queryKeys.documents, queryFn: api.listDocuments });
 
@@ -56,9 +60,11 @@ export function OverviewPage() {
   const leads = leadsQuery.data ?? [];
   const emails = emailsQuery.data ?? [];
   const documents = documentsQuery.data ?? [];
-  const currentEmails = newestEmailsByLead(emails);
+  const activeLeadIds = new Set(leads.map((lead) => lead.id));
+  const currentEmails = newestEmailsByLead(emails).filter((email) => activeLeadIds.has(email.lead_id));
   const pending = currentEmails.filter((email) => email.status === 'pending_review');
   const sent = currentEmails.filter((email) => email.status === 'sent');
+  const emailMetricsUnavailable = leadsQuery.isError || emailsQuery.isError;
   const topLeads = leads.slice(0, 5);
   const recentEmails = currentEmails.slice(0, 5);
 
@@ -83,8 +89,8 @@ export function OverviewPage() {
 
       <section className={styles.metrics} aria-label='Workspace summary'>
         <Metric icon={<Target />} label='Opportunities' value={leadsQuery.isError ? '—' : leads.length} tone='forest' to='/opportunities' />
-        <Metric icon={<MailCheck />} label='Needs review' value={emailsQuery.isError ? '—' : pending.length} tone='clay' to='/opportunities?outreach=pending_review' />
-        <Metric icon={<CircleCheck />} label='Sent' value={emailsQuery.isError ? '—' : sent.length} tone='timber' to='/opportunities?outreach=sent' />
+        <Metric icon={<MailCheck />} label='Needs review' value={emailMetricsUnavailable ? '—' : pending.length} tone='clay' to='/opportunities?outreach=pending_review' />
+        <Metric icon={<CircleCheck />} label='Sent' value={emailMetricsUnavailable ? '—' : sent.length} tone='timber' to='/opportunities?outreach=sent' />
         <Metric icon={<BookOpenText />} label='Strategy docs' value={documentsQuery.isError ? '—' : documents.length} tone='sage' to='/knowledge' />
       </section>
 

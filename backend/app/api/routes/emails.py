@@ -10,7 +10,15 @@ from sqlalchemy.orm import Session, selectinload
 from app.api.dependencies.auth import get_current_user
 from app.config import get_settings
 from app.db.database import get_db
-from app.db.models import Email, EmailStatus, EmailStatusEvent, User
+from app.db.models import (
+    AgentRun,
+    Email,
+    EmailStatus,
+    EmailStatusEvent,
+    Lead,
+    LeadReviewStatus,
+    User,
+)
 from app.email_content import email_content_hash
 from app.email_signature import effective_signature_for_state
 from app.schemas.email import EmailEdit, EmailRead, EmailStatusUpdate
@@ -59,6 +67,23 @@ def _require_current_email(db: Session, email: Email) -> None:
         _raise_conflict(
             "email_not_current",
             "Only the current outreach email can be changed",
+        )
+
+
+def _lock_active_lead_for_email(db: Session, email_id: str) -> None:
+    lead = db.scalar(
+        select(Lead)
+        .join(AgentRun, AgentRun.lead_id == Lead.id)
+        .join(Email, Email.agent_run_id == AgentRun.id)
+        .where(Email.id == email_id)
+        .with_for_update(of=Lead)
+    )
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Email not found")
+    if lead.review_status is not LeadReviewStatus.active:
+        _raise_conflict(
+            "lead_inactive",
+            "EarlyBid has marked this opportunity as deleted",
         )
 
 
@@ -140,9 +165,11 @@ def edit_email(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    canonical_email_id = _canonical_email_id(email_id)
+    _lock_active_lead_for_email(db, canonical_email_id)
     email = db.scalar(
         select(Email)
-        .where(Email.id == _canonical_email_id(email_id))
+        .where(Email.id == canonical_email_id)
         .with_for_update(of=Email)
     )
     if email is None:
@@ -204,9 +231,11 @@ def update_status(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    canonical_email_id = _canonical_email_id(email_id)
+    _lock_active_lead_for_email(db, canonical_email_id)
     email = db.scalar(
         select(Email)
-        .where(Email.id == _canonical_email_id(email_id))
+        .where(Email.id == canonical_email_id)
         .with_for_update(of=Email)
     )
     if email is None:

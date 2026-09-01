@@ -2,7 +2,7 @@
 
 One EarlyBid opportunity = one Lead = one card in the UI.
 """
-from datetime import datetime, timezone
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db.database import get_db
-from app.db.models import EmailGenerationTrigger, Lead
+from app.db.models import EmailGenerationTrigger, Lead, LeadReviewStatus
 from app.email_signature import default_signature_for_state
 from app.schemas.email_generation import (
     EmailGenerationJobRead,
@@ -19,7 +19,6 @@ from app.schemas.email_generation import (
 )
 from app.schemas.earlybid_sync import EarlyBidSyncStatusRead
 from app.schemas.lead import (
-    LeadArchiveResult,
     LeadContactEdit,
     LeadListRead,
     LeadRead,
@@ -129,10 +128,18 @@ async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)
 
 
 @router.get("", response_model=list[LeadListRead])
-def list_leads(db: Session = Depends(get_db)):
+def list_leads(
+    view: Literal["active", "dismissed"] = "active",
+    db: Session = Depends(get_db),
+):
+    review_status = (
+        LeadReviewStatus.active
+        if view == "active"
+        else LeadReviewStatus.deleted
+    )
     leads = db.scalars(
         select(Lead)
-        .where(Lead.archived_at.is_(None))
+        .where(Lead.review_status == review_status)
         .order_by(Lead.score.desc().nullslast())
     ).all()
     return [
@@ -157,12 +164,13 @@ def get_lead_workspace(lead_id: str, db: Session = Depends(get_db)):
     lead = db.scalar(
         select(Lead).where(
             Lead.id == canonical_lead_id,
-            Lead.archived_at.is_(None),
+            Lead.review_status.is_not(None),
         )
     )
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead not found")
-    email_generation_service.ensure_low_context_fallback_email(db, lead.id)
+    if lead.review_status is LeadReviewStatus.active:
+        email_generation_service.ensure_low_context_fallback_email(db, lead.id)
     emails = email_generation_service.emails_for_lead(db, lead.id)
     current_email = emails[0] if emails else None
     return LeadWorkspaceRead(
@@ -192,12 +200,19 @@ def update_lead_contact(
         select(Lead)
         .where(
             Lead.id == canonical_lead_id,
-            Lead.archived_at.is_(None),
         )
         .with_for_update()
     )
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead not found")
+    if lead.review_status is not LeadReviewStatus.active:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "lead_inactive",
+                "message": "EarlyBid has marked this opportunity as deleted",
+            },
+        )
 
     changes = payload.model_dump(exclude_unset=True)
     if "contacts" in changes:
@@ -244,27 +259,6 @@ def request_email_generation(
             status_code=500,
             detail="Email generation could not be queued",
         ) from None
-
-
-@router.delete("/{lead_id}", response_model=LeadArchiveResult)
-def archive_lead(lead_id: str, db: Session = Depends(get_db)):
-    """Soft-delete an opportunity so it no longer appears in the list."""
-
-    canonical_lead_id = _canonical_lead_id(lead_id)
-    lead = db.scalar(
-        select(Lead)
-        .where(
-            Lead.id == canonical_lead_id,
-            Lead.archived_at.is_(None),
-        )
-        .with_for_update()
-    )
-    if lead is None:
-        raise HTTPException(status_code=404, detail="Lead not found")
-
-    lead.archived_at = datetime.now(timezone.utc)
-    db.commit()
-    return LeadArchiveResult(id=lead.id, archived=True)
 
 
 def _canonical_lead_id(lead_id: str) -> str:

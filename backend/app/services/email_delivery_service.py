@@ -24,6 +24,7 @@ from app.db.models import (
     EmailStatus,
     EmailStatusEvent,
     Lead,
+    LeadReviewStatus,
 )
 from app.email_content import email_content_hash
 from app.email_signature import effective_signature_for_state
@@ -39,6 +40,7 @@ ACTIVE_DELIVERY_STATUSES = (
 WORKER_LEASE_EXPIRED = "worker_lease_expired"
 DELIVERY_EXECUTION_UNKNOWN = "delivery_execution_unknown"
 DELIVERY_FINALIZATION_UNKNOWN = "delivery_finalization_unknown"
+LEAD_INACTIVE = "lead_inactive"
 
 
 class EmailNotFoundError(LookupError):
@@ -128,16 +130,6 @@ def enqueue_delivery(
     if not requester:
         raise ValueError("requested_by must not be blank")
 
-    existing = db.scalar(
-        select(EmailDeliveryJob).where(
-            EmailDeliveryJob.idempotency_key == key
-        )
-    )
-    if existing is not None:
-        if existing.email_id != canonical_email_id:
-            raise IdempotencyKeyConflictError(key)
-        return existing
-
     lead_id = db.scalar(
         select(AgentRun.lead_id)
         .join(Email, Email.agent_run_id == AgentRun.id)
@@ -148,11 +140,26 @@ def enqueue_delivery(
 
     # Generation enqueueing uses the same lead lock. This makes send versus
     # regenerate races deterministic: exactly one workflow can become active.
-    locked_lead_id = db.scalar(
-        select(Lead.id).where(Lead.id == lead_id).with_for_update()
+    locked_lead = db.scalar(
+        select(Lead).where(Lead.id == lead_id).with_for_update()
     )
-    if locked_lead_id is None:
+    if locked_lead is None:
         raise EmailNotFoundError(email_id)
+    if locked_lead.review_status is not LeadReviewStatus.active:
+        raise EmailDeliveryConflictError(
+            LEAD_INACTIVE,
+            "EarlyBid has marked this opportunity as deleted",
+        )
+
+    existing = db.scalar(
+        select(EmailDeliveryJob).where(
+            EmailDeliveryJob.idempotency_key == key
+        )
+    )
+    if existing is not None:
+        if existing.email_id != canonical_email_id:
+            raise IdempotencyKeyConflictError(key)
+        return existing
 
     email = db.scalar(
         select(Email)
@@ -333,6 +340,19 @@ def claim_next_job(
     )
     if job is None:
         db.rollback()
+        return None
+
+    review_status = db.scalar(
+        select(Lead.review_status)
+        .join(AgentRun, AgentRun.lead_id == Lead.id)
+        .join(Email, Email.agent_run_id == AgentRun.id)
+        .where(Email.id == job.email_id)
+    )
+    if review_status is not LeadReviewStatus.active:
+        job.status = EmailDeliveryJobStatus.failed
+        job.error_code = LEAD_INACTIVE
+        job.completed_at = _utc_now()
+        db.commit()
         return None
 
     now = _utc_now()

@@ -24,6 +24,7 @@ from app.db.models import (
     EmailStatus,
     EmailStatusEvent,
     Lead,
+    LeadReviewStatus,
     User,
 )
 
@@ -162,6 +163,28 @@ class EmailDeliveryApiTests(unittest.TestCase):
             json={"recipient_email": "not-an-email"},
         )
         self.assertEqual(response.status_code, 422)
+
+    def test_earlybid_deleted_lead_blocks_email_mutations(self) -> None:
+        self._authorize()
+        email_id = self._seed_email()
+        with self.session_factory() as db:
+            email = db.get(Email, email_id)
+            email.agent_run.lead.review_status = LeadReviewStatus.deleted
+            db.commit()
+
+        edit = self.client.patch(
+            f"/api/emails/{email_id}",
+            json={"subject": "Should not save"},
+        )
+        self.assertEqual(edit.status_code, 409)
+        self.assertEqual(edit.json()["detail"]["code"], "lead_inactive")
+
+        review = self.client.post(
+            f"/api/emails/{email_id}/status",
+            json={"status": "approved"},
+        )
+        self.assertEqual(review.status_code, 409)
+        self.assertEqual(review.json()["detail"]["code"], "lead_inactive")
 
     def test_approval_requires_valid_recipient_and_nonblank_body(self) -> None:
         self._authorize()

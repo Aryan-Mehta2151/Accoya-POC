@@ -30,7 +30,6 @@ vi.mock('../../lib/api', async (importOriginal) => {
       getLeadSyncStatus: vi.fn(),
       syncLeads: vi.fn(),
       uploadLeadsCsv: vi.fn(),
-      deleteLead: vi.fn(),
       getLeadWorkspace: vi.fn(),
       queueEmailGeneration: vi.fn(),
       editEmail: vi.fn(),
@@ -61,6 +60,15 @@ const lead = (overrides: Partial<Lead> = {}): Lead => ({
   meeting_date: null,
   tags: 'siding, architect',
   url: 'https://example.com/opportunity',
+  reported: null,
+  due_date: null,
+  award_date: null,
+  start_date: null,
+  response_deadline_evidence: null,
+  keywords_matched: [],
+  review_status: 'active',
+  deleted_by: null,
+  deleted_reasons: [],
   source_feed: 'earlybid/client',
   created_at: '2026-07-01T00:00:00Z',
   ...overrides,
@@ -214,7 +222,6 @@ beforeEach(() => {
     total: 1,
     generation_queued: 1,
   });
-  vi.mocked(api.deleteLead).mockResolvedValue({ id: 'lead-1', archived: true });
 });
 
 afterEach(() => cleanup());
@@ -379,16 +386,24 @@ describe('Opportunities list', () => {
     expect(await screen.findByRole('heading', { name: 'Email workspace' })).toBeInTheDocument();
   });
 
-  it('deletes an opportunity from the list after confirmation', async () => {
+  it('switches to the read-only dismissed feed view without local delete controls', async () => {
+    vi.mocked(api.listLeads).mockImplementation(async (view = 'active') => (
+      view === 'dismissed'
+        ? [lead({
+          review_status: 'deleted',
+          deleted_by: 'operator',
+          deleted_reasons: ['not_relevant'],
+        })]
+        : [lead()]
+    ));
     const { user } = renderAt('/opportunities');
     await screen.findByRole('table');
 
-    await user.click(screen.getAllByRole('button', { name: 'Delete opportunity Harbour Arts Centre' })[0]);
-    const modal = screen.getByRole('dialog', { name: 'Delete opportunity?' });
-    expect(within(modal).getByText('Harbour Arts Centre')).toBeInTheDocument();
-    await user.click(within(modal).getByRole('button', { name: 'Delete opportunity' }));
+    expect(screen.queryByRole('button', { name: /Delete opportunity/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Dismissed' }));
 
-    await waitFor(() => expect(api.deleteLead).toHaveBeenCalledWith('lead-1'));
+    await waitFor(() => expect(api.listLeads).toHaveBeenCalledWith('dismissed'));
+    expect((await screen.findAllByText(/Deleted by operator/)).length).toBeGreaterThan(0);
   });
 
   it('shows the latest automatic result and next Pacific midnight without posting on mount', async () => {
@@ -495,6 +510,29 @@ describe('Opportunity email workspace', () => {
     expect(screen.getByRole('textbox', { name: 'Subject' })).toHaveValue('Accoya for Harbour Arts Centre');
     expect(screen.getAllByText('alex@example.com', { selector: 'dd' })).toHaveLength(2);
     expect(api.queueEmailGeneration).not.toHaveBeenCalled();
+  });
+
+  it('renders dismissed details and keeps outreach read-only', async () => {
+    vi.mocked(api.getLeadWorkspace).mockResolvedValue(workspace({
+      lead: lead({
+        review_status: 'deleted',
+        deleted_by: 'operator',
+        deleted_reasons: ['not_relevant'],
+        due_date: '2026-09-10',
+        keywords_matched: ['decking', 'public realm'],
+        reported: { source: 'agenda' },
+        response_deadline_evidence: [{ quote: 'Due September 10' }],
+      }),
+    }));
+    renderAt('/opportunities/lead-1');
+
+    expect(await screen.findByText('Deleted in EarlyBid')).toBeInTheDocument();
+    expect(screen.getByText('Sep 10, 2026')).toBeInTheDocument();
+    expect(screen.getByText('public realm')).toBeInTheDocument();
+    expect(screen.getByText(/"source": "agenda"/)).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'To' })).toHaveAttribute('readonly');
+    expect(screen.getByRole('button', { name: 'Regenerate email' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Edit contact information' })).not.toBeInTheDocument();
   });
 
   it('queues the first email and shows a passive waiting state', async () => {

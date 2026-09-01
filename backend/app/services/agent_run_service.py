@@ -27,6 +27,7 @@ from app.db.models import (
     EmailStatus,
     EmailStatusEvent,
     Lead,
+    LeadReviewStatus,
 )
 from app.services.email_generator import EmailAgent, build_agent_lead
 
@@ -102,6 +103,8 @@ def execute_agent_run(
         raise LeadNotFoundError(lead_id) from None
     lead = db.get(Lead, canonical_lead_id)
     if lead is None:
+        raise LeadNotFoundError(lead_id)
+    if lead.review_status is not LeadReviewStatus.active:
         raise LeadNotFoundError(lead_id)
 
     curated_input = build_agent_lead(lead)

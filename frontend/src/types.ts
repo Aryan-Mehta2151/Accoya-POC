@@ -1,3 +1,7 @@
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+export type LeadReviewStatus = 'active' | 'deleted';
+
 export type Lead = {
   id: string;
   external_id: string;
@@ -17,6 +21,15 @@ export type Lead = {
   meeting_date: string | null;
   tags: string | null;
   url: string | null;
+  reported: JsonValue | null;
+  due_date: string | null;
+  award_date: string | null;
+  start_date: string | null;
+  response_deadline_evidence: JsonValue | null;
+  keywords_matched: string[];
+  review_status: LeadReviewStatus | null;
+  deleted_by: 'client' | 'ai' | 'operator' | null;
+  deleted_reasons: string[];
   source_feed: string | null;
   created_at: string;
   current_email?: EmailSummary | null;
@@ -169,11 +182,6 @@ export type LeadWorkspace = {
   current_email_id: string | null;
   current_email_is_stale: boolean;
   latest_generation: EmailGenerationJob | null;
-};
-
-export type LeadArchiveResult = {
-  id: string;
-  archived: boolean;
 };
 
 export type StrategyDocument = {

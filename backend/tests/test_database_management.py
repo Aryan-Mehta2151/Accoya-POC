@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 from sqlalchemy import create_engine, text
 
 from app.db import bootstrap, database
-from app.db.models import AgentRun, EarlyBidSyncRun, EmailGenerationJob, User
+from app.db.models import AgentRun, EarlyBidSyncRun, EmailGenerationJob, Lead, User
 
 
 class SchemaValidationTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class SchemaValidationTests(unittest.TestCase):
 
     def test_missing_revision_is_rejected_and_head_is_accepted(self) -> None:
         expected_heads = database.get_expected_schema_heads()
-        self.assertEqual(expected_heads, ("0009_email_signatures",))
+        self.assertEqual(expected_heads, ("0010_earlybid_lead_lifecycle",))
 
         with patch.object(database, "engine", self.engine):
             with self.assertRaisesRegex(RuntimeError, "not at the required"):
@@ -128,6 +128,39 @@ class SchemaValidationTests(unittest.TestCase):
             )
         )
 
+        lifecycle = next(
+            constraint
+            for constraint in table.constraints
+            if constraint.name == "ck_email_generation_jobs_lifecycle"
+        )
+        self.assertIn(
+            "attempt_count > 0 OR status = 'system_error'",
+            str(lifecycle.sqltext),
+        )
+
+    def test_lead_metadata_includes_earlybid_lifecycle_fields(self) -> None:
+        table = Lead.__table__
+        self.assertTrue(
+            {
+                "reported",
+                "due_date",
+                "award_date",
+                "start_date",
+                "response_deadline_evidence",
+                "keywords_matched",
+                "review_status",
+                "deleted_by",
+                "deleted_reasons",
+            }.issubset(table.c.keys())
+        )
+        self.assertTrue(table.c.review_status.nullable)
+        self.assertFalse(table.c.keywords_matched.nullable)
+        self.assertFalse(table.c.deleted_reasons.nullable)
+        self.assertIn(
+            "ix_leads_review_status",
+            {index.name for index in table.indexes},
+        )
+
     def test_earlybid_sync_metadata_enforces_schedule_and_attempt_invariants(self):
         table = EarlyBidSyncRun.__table__
 
@@ -178,6 +211,10 @@ class SchemaValidationTests(unittest.TestCase):
         }
         self.assertIn(
             "created_count + updated_count <= total_count",
+            checks["ck_earlybid_sync_runs_result_count_bounds"],
+        )
+        self.assertIn(
+            "generation_queued_count <= created_count + updated_count",
             checks["ck_earlybid_sync_runs_result_count_bounds"],
         )
         self.assertIn(

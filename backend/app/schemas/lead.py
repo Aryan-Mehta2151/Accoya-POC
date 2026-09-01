@@ -1,11 +1,11 @@
 """Pydantic schemas for leads (EarlyBid opportunities)."""
-from datetime import datetime
+from datetime import date, datetime
 import json
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from app.db.models import EmailStatus
+from app.db.models import EmailStatus, LeadReviewStatus
 from app.schemas.email import EmailRead
 from app.schemas.email_generation import EmailGenerationJobRead
 
@@ -31,6 +31,15 @@ class LeadRead(BaseModel):
     meeting_date: str | None = None
     tags: str | None = None
     url: str | None = None
+    reported: Any | None = None
+    due_date: date | None = None
+    award_date: date | None = None
+    start_date: date | None = None
+    response_deadline_evidence: Any | None = None
+    keywords_matched: list[str] = Field(default_factory=list)
+    review_status: LeadReviewStatus | None = None
+    deleted_by: str | None = None
+    deleted_reasons: list[str] = Field(default_factory=list)
     source_feed: str | None = None
     created_at: datetime
 
@@ -78,11 +87,6 @@ class LeadUploadResult(BaseModel):
     updated: int
     total: int
     generation_queued: int
-
-
-class LeadArchiveResult(BaseModel):
-    id: str
-    archived: bool
 
 
 class CurrentEmailSummary(BaseModel):

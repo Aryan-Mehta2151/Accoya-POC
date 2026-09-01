@@ -10,8 +10,10 @@ import csv
 import hashlib
 import io
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from typing import Any
 
 import httpx
@@ -20,11 +22,24 @@ from sqlalchemy.orm import Session
 
 from agent.normalization import EARLYBID_NATURAL_ID_PREFIX, normalize_lead
 from app.config import get_settings
-from app.db.models import EmailGenerationTrigger, Lead
+from app.db.models import (
+    AgentRun,
+    Email,
+    EmailDeliveryJob,
+    EmailDeliveryJobStatus,
+    EmailGenerationJob,
+    EmailGenerationJobStatus,
+    EmailGenerationTrigger,
+    Lead,
+    LeadReviewStatus,
+)
 from app.services.email_generation_service import enqueue_initial_generations
 
 settings = get_settings()
 EARLYBID_SOURCE_SYSTEM = "earlybid"
+LEAD_INACTIVE_ERROR = "lead_inactive"
+_DELETED_BY_VALUES = frozenset(("client", "ai", "operator"))
+_ISO_DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
 class LeadFeedError(RuntimeError):
@@ -155,6 +170,112 @@ def _json_safe_mapping(row: Mapping[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(dict(row), default=str))
 
 
+def _cell(row: Mapping[str, Any], *names: str) -> tuple[bool, Any]:
+    for name in names:
+        if name in row:
+            return True, row[name]
+    return False, None
+
+
+def _blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def _parse_json_cell(value: Any, *, field: str) -> Any | None:
+    if _blank(value):
+        return None
+    if isinstance(value, str):
+        try:
+            return json.loads(
+                value,
+                parse_constant=_reject_json_constant,
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError(f"invalid_{field}_json") from exc
+    try:
+        return json.loads(json.dumps(value, default=str, allow_nan=False))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid_{field}_json") from exc
+
+
+def _parse_date_cell(value: Any, *, field: str) -> date | None:
+    if _blank(value):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text_value = str(value).strip()
+    try:
+        if _ISO_DATE_PATTERN.fullmatch(text_value) is None:
+            raise ValueError
+        return date.fromisoformat(text_value)
+    except ValueError as exc:
+        raise ValueError(f"invalid_{field}") from exc
+
+
+def _parse_list_cell(value: Any, *, field: str) -> list[str]:
+    if _blank(value):
+        return []
+    if isinstance(value, str):
+        values = value.split(";")
+    elif isinstance(value, Iterable) and not isinstance(value, Mapping):
+        values = value
+    else:
+        raise ValueError(f"invalid_{field}")
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
+def _expanded_feed_fields(row: Mapping[str, Any]) -> dict[str, Any]:
+    reported_present, reported = _cell(row, "reported", "Reported")
+    evidence_present, evidence = _cell(
+        row,
+        "response_deadline_evidence",
+        "Response Deadline Evidence",
+    )
+    status_present, status_value = _cell(row, "review_status", "Review Status")
+    if status_present:
+        status_text = "" if status_value is None else str(status_value).strip().casefold()
+        if status_text not in (LeadReviewStatus.active.value, LeadReviewStatus.deleted.value):
+            raise ValueError("invalid_review_status")
+        review_status = LeadReviewStatus(status_text)
+    else:
+        review_status = LeadReviewStatus.active
+
+    _, deleted_by_value = _cell(row, "deleted_by", "Deleted By")
+    deleted_by = None if _blank(deleted_by_value) else str(deleted_by_value).strip().casefold()
+    if deleted_by is not None and deleted_by not in _DELETED_BY_VALUES:
+        raise ValueError("invalid_deleted_by")
+
+    _, due_date = _cell(row, "due_date", "Due Date")
+    _, award_date = _cell(row, "award_date", "Award Date")
+    _, start_date = _cell(row, "start_date", "Start Date")
+    _, keywords = _cell(row, "keywords_matched", "Keywords Matched")
+    _, deleted_reasons = _cell(row, "deleted_reasons", "Deleted Reasons")
+    return {
+        "reported": _parse_json_cell(reported, field="reported") if reported_present else None,
+        "due_date": _parse_date_cell(due_date, field="due_date"),
+        "award_date": _parse_date_cell(award_date, field="award_date"),
+        "start_date": _parse_date_cell(start_date, field="start_date"),
+        "response_deadline_evidence": (
+            _parse_json_cell(evidence, field="response_deadline_evidence")
+            if evidence_present
+            else None
+        ),
+        "keywords_matched": _parse_list_cell(keywords, field="keywords_matched"),
+        "review_status": review_status,
+        "deleted_by": deleted_by,
+        "deleted_reasons": _parse_list_cell(
+            deleted_reasons,
+            field="deleted_reasons",
+        ),
+    }
+
+
 def normalized_row_fields(
     row: Mapping[str, Any],
     *,
@@ -168,7 +289,7 @@ def normalized_row_fields(
         (contact.email for contact in normalized.contacts if contact.email),
         None,
     )
-    return {
+    fields = {
         "source_system": source_system,
         "external_id": normalized.lead_id,
         "section": normalized.section,
@@ -190,8 +311,9 @@ def normalized_row_fields(
         "url": normalized.url,
         "raw_data": _json_safe_mapping(row),
         "source_feed": source_feed,
-        "archived_at": None,
     }
+    fields.update(_expanded_feed_fields(row))
+    return fields
 
 
 def _validation_reason(exc: TypeError | ValueError) -> str:
@@ -201,6 +323,19 @@ def _validation_reason(exc: TypeError | ValueError) -> str:
     message = str(exc).casefold()
     if "display rank" in message:
         return "invalid_explicit_identity"
+    for reason in (
+        "invalid_reported_json",
+        "invalid_response_deadline_evidence_json",
+        "invalid_due_date",
+        "invalid_award_date",
+        "invalid_start_date",
+        "invalid_keywords_matched",
+        "invalid_review_status",
+        "invalid_deleted_by",
+        "invalid_deleted_reasons",
+    ):
+        if reason in message:
+            return reason
     if any(term in message for term in ("project", "location", "identity_scope")):
         return "invalid_natural_identity"
     return "invalid_lead"
@@ -276,10 +411,12 @@ def upsert_feed_rows(
     )
 
     existing_leads = db.scalars(
-        select(Lead).where(
+        select(Lead)
+        .where(
             Lead.source_system == source_system,
             Lead.external_id.in_(list(prepared)),
         )
+        .with_for_update()
     ).all()
     by_external_id = {lead.external_id: lead for lead in existing_leads}
 
@@ -291,26 +428,73 @@ def upsert_feed_rows(
         if lead is None:
             lead = Lead(**fields)
             db.add(lead)
-            if created_leads is not None:
+            if (
+                created_leads is not None
+                and fields["review_status"] is LeadReviewStatus.active
+            ):
                 created_leads.append(lead)
             created += 1
         else:
-            # A restored archived lead should behave like a brand-new
-            # opportunity, without prior outreach status/history.
-            restored_from_archive = lead.archived_at is not None
-            if restored_from_archive:
-                lead.agent_runs.clear()
-                lead.email_generation_jobs.clear()
+            previous_status = lead.review_status
+            next_status = fields["review_status"]
             for attr, value in fields.items():
                 setattr(lead, attr, value)
-            if restored_from_archive:
-                if created_leads is not None:
-                    created_leads.append(lead)
-                created += 1
-            else:
-                updated += 1
+            if (
+                created_leads is not None
+                and previous_status is not LeadReviewStatus.active
+                and next_status is LeadReviewStatus.active
+                and not _has_outreach_history(db, lead.id)
+            ):
+                created_leads.append(lead)
+            if (
+                previous_status is not LeadReviewStatus.deleted
+                and next_status is LeadReviewStatus.deleted
+            ):
+                _terminalize_queued_work(db, lead.id)
+            updated += 1
         touched.append(lead)
     return touched, created, updated
+
+
+def _has_outreach_history(db: Session, lead_id: str) -> bool:
+    return db.scalar(
+        select(AgentRun.id).where(AgentRun.lead_id == lead_id).limit(1)
+    ) is not None or db.scalar(
+        select(EmailGenerationJob.id)
+        .where(EmailGenerationJob.lead_id == lead_id)
+        .limit(1)
+    ) is not None
+
+
+def _terminalize_queued_work(db: Session, lead_id: str) -> None:
+    now = datetime.now(timezone.utc)
+    generation_jobs = db.scalars(
+        select(EmailGenerationJob)
+        .where(
+            EmailGenerationJob.lead_id == lead_id,
+            EmailGenerationJob.status == EmailGenerationJobStatus.queued,
+        )
+        .with_for_update()
+    ).all()
+    for job in generation_jobs:
+        job.status = EmailGenerationJobStatus.system_error
+        job.error_code = LEAD_INACTIVE_ERROR
+        job.completed_at = now
+
+    delivery_jobs = db.scalars(
+        select(EmailDeliveryJob)
+        .join(Email, EmailDeliveryJob.email_id == Email.id)
+        .join(AgentRun, Email.agent_run_id == AgentRun.id)
+        .where(
+            AgentRun.lead_id == lead_id,
+            EmailDeliveryJob.status == EmailDeliveryJobStatus.queued,
+        )
+        .with_for_update(of=EmailDeliveryJob)
+    ).all()
+    for job in delivery_jobs:
+        job.status = EmailDeliveryJobStatus.failed
+        job.error_code = LEAD_INACTIVE_ERROR
+        job.completed_at = now
 
 
 def stage_feed_sync(

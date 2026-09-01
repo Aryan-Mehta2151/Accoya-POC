@@ -208,6 +208,10 @@ class EmailAgentIntegrationTests(unittest.TestCase):
                 "meeting_date",
                 "tags",
                 "url",
+                "due_date",
+                "award_date",
+                "start_date",
+                "keywords_matched",
             },
         )
 

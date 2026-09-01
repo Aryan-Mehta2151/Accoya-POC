@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import uuid
 import unittest
-from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -14,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.routes import leads
 from app.db.database import Base, get_db
-from app.db.models import Lead
+from app.db.models import Lead, LeadReviewStatus
 
 
 class LeadContactApiTests(unittest.TestCase):
@@ -97,14 +95,15 @@ class LeadContactApiTests(unittest.TestCase):
         self.assertEqual(response.json()["contacts"], "Jordan Lee")
         self.assertEqual(response.json()["contact_email"], "original@example.com")
 
-    def test_archived_lead_cannot_be_updated(self) -> None:
+    def test_earlybid_deleted_lead_cannot_be_updated(self) -> None:
         with self.session_factory() as db:
             lead = db.get(Lead, self.lead_id)
-            lead.archived_at = datetime.now(timezone.utc)
+            lead.review_status = LeadReviewStatus.deleted
             db.commit()
 
         response = self.client.patch(
             f"/api/leads/{self.lead_id}",
             json={"contacts": "Jordan Lee"},
         )
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["code"], "lead_inactive")

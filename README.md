@@ -433,7 +433,7 @@ earlybid_sync_runs            chat_messages            strategy_documents
 
 | Table | Purpose and important invariants |
 | --- | --- |
-| `leads` | Current normalized lead projection with native UUID primary key and unique `(source_system, external_id)` identity. It stores all current agent inputs, first-class `next_step`, optional `contact_email`, JSONB tags and detached raw feed payload, source metadata, and create/update/archive timestamps. Feed sync updates this projection rather than creating historical snapshots. |
+| `leads` | Current normalized lead projection with native UUID primary key and unique `(source_system, external_id)` identity. It stores all current agent inputs, the EarlyBid-owned `review_status`, deletion metadata, added dates and JSON/list fields, JSONB tags and detached raw feed payload, and source metadata. Feed sync updates this projection rather than creating historical snapshots. The legacy `archived_at` column remains temporarily but is not used for visibility or workflow decisions. |
 | `earlybid_sync_runs` | One durable scheduled run per reseller/client/local schedule date. Status is `queued`, `running`, `retry_wait`, `succeeded`, or `failed`; the row records its UTC schedule, attempt and lease state, safe error code, next retry time, completion time, and final ingestion/generation counts. It stores no feed payload or contact data. |
 | `email_generation_jobs` | Durable requested work for one lead. A job records its trigger, requested input hash, idempotency key, optional retry link, safe error code, attempt count, and queue/claim/heartbeat/completion timestamps. Status is `queued`, `running`, `generated`, `insufficient_context`, `provider_error`, or `system_error`. A unique idempotency key makes request replay safe, and a PostgreSQL partial unique index allows at most one queued/running job per lead. |
 | `agent_runs` | One durable attempt for one lead, with optional `retry_of_run_id` and nullable unique `email_generation_job_id` for worker-created attempts. Status is `running`, `generated`, `insufficient_context`, `provider_error`, or `system_error`. A run stores the curated-input SHA-256 hash, safe selections/warnings/error code, immutable original draft, prompt/catalog versions, model name, aggregate model/retrieval/token counts, latency, and start/completion times. Database checks enforce the SHA-256 shape, nonnegative telemetry, nurturing numbers 1-7, and valid running/generated/failure terminal shapes. |
@@ -450,15 +450,16 @@ Alembic compares both column types and server defaults against ORM metadata.
 
 EarlyBid natural identity is stored in the existing unrestricted
 `leads.external_id` column and uses the existing unique `(source_system,
-external_id)` constraint. This is an ingestion-only change and requires no
-database migration.
+external_id)` constraint. Migration `0010_earlybid_lead_lifecycle` adds the
+expanded feed fields and source-owned lifecycle state. It marks visible legacy
+rows active and leaves locally archived legacy rows with an internal unknown
+status until a full feed sync supplies `active` or `deleted`.
 
-Deleting a lead cascades through its generation jobs, runs, generated emails,
-status events, and delivery jobs. Deleting a referenced generation or delivery
-job clears its job retry link, while run retry links use `RESTRICT`. Indexes
-cover active generation/delivery claiming, lead score/archive queries, run
-lead/status/time and cursor queries, email status/time queries, and event
-history.
+Physical lead deletion is not exposed through the API. EarlyBid deletion keeps
+the lead and its complete outreach history for the authenticated Dismissed
+audit view. Indexes cover source lifecycle and score queries, active
+generation/delivery claiming, run lead/status/time and cursor queries, email
+status/time queries, and event history.
 
 An `agent_runs` record deliberately does **not** persist its curated/normalized
 input snapshot, routing hints, prompts, retrieval queries or chunks, document
@@ -486,10 +487,19 @@ the hash.
 Re-importing the same opportunity updates its existing current projection on
 `(source_system, external_id)`, even when excluded mutable fields change. The
 normalized projection includes decimal score, `next_step`, contact data and
-best recipient email, normalized tags, location, timing, signal, and the other
-agent inputs. Because the source has no immutable ID, changing a project's
-name or location creates a new identity; the backend cannot reliably infer
-that the renamed or relocated row is the same opportunity.
+best recipient email, normalized tags, location, timing, signal, and all nine
+expanded EarlyBid fields. Compact JSON and ISO `YYYY-MM-DD` dates are validated;
+list cells are split on semicolons. Legacy 17-column feeds remain accepted and
+default their rows to active. Because the source has no immutable ID, changing
+a project's name or location creates a new identity; the backend cannot
+reliably infer that the renamed or relocated row is the same opportunity.
+
+`review_status` is owned solely by EarlyBid. Active rows appear in the default
+lead list and permit outreach. Deleted rows remain stored in the Dismissed view
+with `deleted_by` and `deleted_reasons`, but all outreach mutations return
+`409 lead_inactive`. Reopening the same identity restores it automatically and
+preserves its history. The application never infers deletion from an absent
+feed row and provides no local hide, restore, or lead-delete operation.
 
 Ingestion is strict and atomic. A CSV upload with an invalid row, missing
 natural-identity component, or conflicting duplicate identity returns HTTP
@@ -497,14 +507,18 @@ natural-identity component, or conflicting duplicate identity returns HTTP
 either case, no rows from that batch are written, rather than silently skipping
 or partially importing them.
 
-Each lead first inserted by either ingestion path queues exactly one initial
-generation in the same database transaction. The deterministic
-`initial-v1:<lead-id>` idempotency key makes repeated ingestion safe. Updating
-an existing lead, including changing agent-relevant fields, never queues
-another draft automatically. The migration and deployment do not backfill
-existing leads; those leads show a manual Generate action on their opportunity
-page. Provider work is performed only by the separate worker, after ingestion
-has committed and returned.
+Each active lead first inserted by either ingestion path queues exactly one
+initial generation in the same database transaction. New deleted rows do not.
+A deleted lead with no outreach history queues its first draft when EarlyBid
+first activates it; reopening a lead with existing outreach never generates a
+second draft automatically. The deterministic `initial-v1:<lead-id>`
+idempotency key makes repeated ingestion safe. Provider work is performed only
+by the separate worker, after ingestion has committed and returned.
+
+When EarlyBid deletes a lead, queued generation and delivery jobs fail safely
+with `lead_inactive`. A generation result already in progress is discarded at
+finalization if the lead became inactive. An SMTP job already running records
+its actual outcome because it may already have reached the relay.
 
 The sync response includes `generation_queued`. CSV upload now returns
 `{items, created, updated, total, generation_queued}` rather than a bare lead
@@ -553,8 +567,8 @@ ID. ORM internals and arbitrary raw feed fields are never added to the prompt.
 | POST | `/api/leads/sync` | Fetch and upsert the configured EarlyBid feed |
 | GET | `/api/leads/sync-status` | Read daily schedule and latest durable run status without syncing |
 | POST | `/api/leads/upload-csv` | Normalize and upsert an uploaded feed CSV |
-| GET | `/api/leads` | List leads with current-email and latest-generation summaries |
-| GET | `/api/leads/{lead_id}/workspace` | Read an opportunity, email history, active email, staleness, and latest generation |
+| GET | `/api/leads?view=active\|dismissed` | List active leads by default or source-deleted leads for audit, with current-email and latest-generation summaries |
+| GET | `/api/leads/{lead_id}/workspace` | Read an active or dismissed opportunity, email history, active email, staleness, and latest generation; dismissed workspaces are read-only |
 | POST | `/api/leads/{lead_id}/email-generations` | Idempotently queue Generate, Regenerate, or Retry work |
 | POST | `/api/agent-runs` | Deprecated compatibility adapter that queues work |
 | GET | `/api/agent-runs` | List safe run records with filters and cursor pagination |
@@ -858,7 +872,7 @@ restored queue rows can repeat calls or SMTP delivery.
   there is no in-process rate limiter in this repository, and the API origin must
   not be directly reachable around the proxy.
 - Manual/scheduled lead sync and CSV upload persist contact data and
-  automatically queue a draft for every newly inserted opportunity. Both
+  automatically queue a draft for every newly inserted active opportunity. Both
   generation/sync workers, document operations, and chat can call billable or
   mutating external services.
 - Review status changes alone never send mail; the authenticated Send Email

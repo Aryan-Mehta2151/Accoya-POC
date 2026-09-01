@@ -26,6 +26,7 @@ from app.db.models import (
     EmailStatus,
     EmailStatusEvent,
     Lead,
+    LeadReviewStatus,
 )
 from app.services import email_delivery_service, email_service
 from app.workers import email_delivery as email_delivery_worker
@@ -178,6 +179,33 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                 db.scalar(select(func.count()).select_from(EmailDeliveryJob)),
                 1,
             )
+
+    def test_inactive_lead_blocks_enqueue_and_preclaim_delivery(self) -> None:
+        blocked_email_id = self._seed_email(external_id="inactive-enqueue")
+        with self.session_factory() as db:
+            email = db.get(Email, blocked_email_id)
+            email.agent_run.lead.review_status = LeadReviewStatus.deleted
+            db.commit()
+        with self.assertRaises(email_delivery_service.EmailDeliveryConflictError) as raised:
+            self._enqueue(blocked_email_id)
+        self.assertEqual(raised.exception.code, "lead_inactive")
+
+        queued_email_id = self._seed_email(external_id="inactive-claim")
+        job_id = self._enqueue(queued_email_id)
+        with self.session_factory() as db:
+            email = db.get(Email, queued_email_id)
+            email.agent_run.lead.review_status = LeadReviewStatus.deleted
+            db.commit()
+        with self.session_factory() as db:
+            claim = email_delivery_service.claim_next_job(
+                db,
+                worker_id="inactive-worker",
+            )
+            self.assertIsNone(claim)
+            job = db.get(EmailDeliveryJob, job_id)
+            self.assertEqual(job.status, EmailDeliveryJobStatus.failed)
+            self.assertEqual(job.error_code, "lead_inactive")
+            self.assertEqual(job.attempt_count, 0)
 
     def test_idempotency_key_cannot_be_reused_for_another_email(self) -> None:
         first_email_id = self._seed_email(external_id="idempotency-first")

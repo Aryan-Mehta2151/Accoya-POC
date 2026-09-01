@@ -50,7 +50,7 @@ function Navigation({ compact = false, onNavigate }: { compact?: boolean; onNavi
 
   const prefetchRoute = (to: string) => {
     if (to === '/opportunities' || to === '/') {
-      void queryClient.prefetchQuery({ queryKey: queryKeys.leads, queryFn: api.listLeads });
+      void queryClient.prefetchQuery({ queryKey: queryKeys.leads, queryFn: () => api.listLeads() });
     }
     if (to === '/knowledge' || to === '/') {
       void queryClient.prefetchQuery({ queryKey: queryKeys.documents, queryFn: api.listDocuments });

@@ -151,7 +151,13 @@ function generationMessage(job: EmailGenerationJob): { title: string; descriptio
   };
 }
 
-export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
+export function EmailWorkspace({
+  workspace,
+  inactive = false,
+}: {
+  workspace: LeadWorkspace;
+  inactive?: boolean;
+}) {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [sendOpen, setSendOpen] = useState(false);
@@ -400,7 +406,7 @@ export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
     },
   });
 
-  const shouldBlock = isDirty && !saveMutation.isPending;
+  const shouldBlock = !inactive && isDirty && !saveMutation.isPending;
   const blocker = useBlocker(shouldBlock);
 
   useBeforeUnload(useCallback((event) => {
@@ -452,8 +458,9 @@ export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
     isDeliveryActive(email.latest_delivery) || email.has_unknown_delivery
   ));
   const deliverySucceeded = latestDelivery?.status === 'succeeded';
-  const isReadOnly = Boolean(isTerminal || activeDelivery || isHistorical || deliveryRequestNeedsRetry);
-  const workflowLocked = isTerminal
+  const isReadOnly = Boolean(inactive || isTerminal || activeDelivery || isHistorical || deliveryRequestNeedsRetry);
+  const workflowLocked = inactive
+    || isTerminal
     || activeGeneration
     || activeDelivery
     || isHistorical
@@ -462,7 +469,8 @@ export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
     || statusMutation.isPending
     || deliveryMutation.isPending;
   const savedContentIsDeliverable = Boolean(selectedEmail && hasDeliverableContent(selectedEmail));
-  const generationLocked = activeGeneration
+  const generationLocked = inactive
+    || activeGeneration
     || deliveryBlocksGeneration
     || deliveryRequestNeedsRetry
     || generationMutation.isPending
@@ -502,6 +510,15 @@ export function EmailWorkspace({ workspace }: { workspace: LeadWorkspace }) {
           {activeGeneration || generationMutation.isPending ? 'Generation in progress...' : generationLabel}
         </button>
       </div>
+
+      {inactive ? (
+        <div className={styles.inactiveNotice} role="status">
+          <div>
+            <strong>Outreach is read-only</strong>
+            <span>EarlyBid has marked this opportunity as deleted. History remains available for audit.</span>
+          </div>
+        </div>
+      ) : null}
 
       {activeGeneration && workspace.latest_generation ? (
         <div className={styles.generationState} data-status={workspace.latest_generation.status} role='status'>

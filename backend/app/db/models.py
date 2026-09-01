@@ -90,6 +90,11 @@ class EarlyBidSyncRunStatus(str, enum.Enum):
     failed = "failed"
 
 
+class LeadReviewStatus(str, enum.Enum):
+    active = "active"
+    deleted = "deleted"
+
+
 class AccessRequestStatus(str, enum.Enum):
     pending = "pending"
     approved = "approved"
@@ -115,6 +120,10 @@ _EARLYBID_SYNC_RUN_STATUS = Enum(
     EarlyBidSyncRunStatus,
     name="earlybid_sync_run_status",
 )
+_LEAD_REVIEW_STATUS = Enum(
+    LeadReviewStatus,
+    name="lead_review_status",
+)
 _ACCESS_REQUEST_STATUS = Enum(
     AccessRequestStatus,
     name="access_request_status",
@@ -133,6 +142,7 @@ class Lead(Base):
         ),
         Index("ix_leads_score", "score"),
         Index("ix_leads_archived_at", "archived_at"),
+        Index("ix_leads_review_status", "review_status"),
     )
 
     id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
@@ -163,6 +173,30 @@ class Lead(Base):
     meeting_date: Mapped[str | None] = mapped_column(Text)
     tags: Mapped[list[str] | str | None] = mapped_column(_JSONB)
     url: Mapped[str | None] = mapped_column(Text)
+
+    reported: Mapped[Any | None] = mapped_column(_JSONB)
+    due_date: Mapped[date | None] = mapped_column(Date)
+    award_date: Mapped[date | None] = mapped_column(Date)
+    start_date: Mapped[date | None] = mapped_column(Date)
+    response_deadline_evidence: Mapped[Any | None] = mapped_column(_JSONB)
+    keywords_matched: Mapped[list[str]] = mapped_column(
+        _JSONB,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    review_status: Mapped[LeadReviewStatus | None] = mapped_column(
+        _LEAD_REVIEW_STATUS,
+        nullable=True,
+        default=LeadReviewStatus.active,
+    )
+    deleted_by: Mapped[str | None] = mapped_column(Text)
+    deleted_reasons: Mapped[list[str]] = mapped_column(
+        _JSONB,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
 
     raw_data: Mapped[dict[str, Any]] = mapped_column(
         _JSONB,
@@ -213,7 +247,7 @@ class EarlyBidSyncRun(Base):
         ),
         CheckConstraint(
             "created_count + updated_count <= total_count "
-            "AND generation_queued_count <= created_count",
+            "AND generation_queued_count <= created_count + updated_count",
             name="ck_earlybid_sync_runs_result_count_bounds",
         ),
         CheckConstraint(
@@ -359,7 +393,8 @@ class EmailGenerationJob(Base):
             "AND attempt_count > 0) OR "
             "(status IN ('generated', 'insufficient_context', "
             "'provider_error', 'system_error') "
-            "AND completed_at IS NOT NULL AND attempt_count > 0)",
+            "AND completed_at IS NOT NULL "
+            "AND (attempt_count > 0 OR status = 'system_error'))",
             name="ck_email_generation_jobs_lifecycle",
         ),
         UniqueConstraint(
@@ -720,6 +755,11 @@ class EmailDeliveryJob(Base):
             AND heartbeat_at IS NOT NULL AND send_started_at IS NOT NULL
             AND accepted_at IS NOT NULL AND completed_at IS NOT NULL
             AND error_code IS NULL) OR
+            (status = 'failed' AND attempt_count = 0
+            AND claimed_by IS NULL AND claimed_at IS NULL
+            AND heartbeat_at IS NULL AND send_started_at IS NULL
+            AND accepted_at IS NULL AND completed_at IS NOT NULL
+            AND error_code IS NOT NULL) OR
             (status IN ('failed', 'delivery_unknown') AND attempt_count > 0
             AND claimed_by IS NOT NULL AND claimed_at IS NOT NULL
             AND heartbeat_at IS NOT NULL AND send_started_at IS NOT NULL

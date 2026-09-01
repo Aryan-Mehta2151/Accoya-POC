@@ -36,6 +36,7 @@ from app.db.models import (
     EmailStatus,
     EmailStatusEvent,
     Lead,
+    LeadReviewStatus,
 )
 from app.email_signature import DEFAULT_US_EMAIL_SIGNATURE
 from app.services import email_generation_service
@@ -215,6 +216,44 @@ class EmailGenerationQueueTests(unittest.TestCase):
             self.assertEqual(run.status, AgentRunStatus.running)
             self.assertEqual(run.email_generation_job_id, job_id)
             self.assertNotEqual(run.input_hash, requested_hash)
+
+    def test_inactive_lead_blocks_claim_and_discards_running_result(self) -> None:
+        blocked_lead_id = self._seed_lead("inactive-generation-claim")
+        blocked_job_id = self._enqueue(blocked_lead_id)
+        with self.session_factory() as db:
+            db.get(Lead, blocked_lead_id).review_status = LeadReviewStatus.deleted
+            db.commit()
+        self.assertIsNone(self._claim())
+        with self.session_factory() as db:
+            job = db.get(EmailGenerationJob, blocked_job_id)
+            self.assertEqual(job.status, EmailGenerationJobStatus.system_error)
+            self.assertEqual(job.error_code, "lead_inactive")
+            self.assertEqual(job.attempt_count, 0)
+
+        running_lead_id = self._seed_lead("inactive-generation-finalize")
+        running_job_id = self._enqueue(running_lead_id)
+        claim = self._claim()
+        self.assertIsNotNone(claim)
+        with self.session_factory() as db:
+            db.get(Lead, running_lead_id).review_status = LeadReviewStatus.deleted
+            db.commit()
+        agent = FakeAgent()
+        with self.session_factory() as db:
+            outcome = email_generation_service.execute_claimed_job(
+                db,
+                claim=claim,
+                agent=agent,
+            )
+            self.assertEqual(outcome.id, running_job_id)
+            self.assertEqual(outcome.status, EmailGenerationJobStatus.system_error)
+            self.assertEqual(outcome.error_code, "lead_inactive")
+            self.assertIsNone(
+                db.scalar(
+                    select(Email.id)
+                    .join(AgentRun, Email.agent_run_id == AgentRun.id)
+                    .where(AgentRun.lead_id == running_lead_id)
+                )
+            )
 
     def test_generated_outcome_is_finalized_atomically_after_provider_call(self) -> None:
         lead_id = self._seed_lead()
@@ -802,37 +841,35 @@ class EmailGenerationApiTests(unittest.TestCase):
         self.assertIn("Accoya", payload["emails"][0]["subject"])
         self.assertIn("Depending on the application", payload["emails"][0]["body"])
 
-    def test_archive_hides_lead_and_blocks_workspace_and_generation(self) -> None:
-        archived_lead_id = self._seed_lead("archive-target")
-        remaining_lead_id = self._seed_lead("archive-other")
-
-        archive = self.client.delete(f"/api/leads/{archived_lead_id}")
-        self.assertEqual(archive.status_code, 200)
-        self.assertEqual(
-            archive.json(),
-            {"id": archived_lead_id, "archived": True},
-        )
+    def test_earlybid_deletion_hides_lead_and_blocks_generation(self) -> None:
+        deleted_lead_id = self._seed_lead("deleted-target")
+        remaining_lead_id = self._seed_lead("deleted-other")
+        with self.session_factory() as db:
+            deleted = db.get(Lead, deleted_lead_id)
+            deleted.review_status = LeadReviewStatus.deleted
+            deleted.deleted_by = "operator"
+            deleted.deleted_reasons = ["not_relevant"]
+            db.commit()
 
         list_response = self.client.get("/api/leads")
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(len(list_response.json()), 1)
         self.assertEqual(list_response.json()[0]["id"], remaining_lead_id)
 
-        workspace = self.client.get(f"/api/leads/{archived_lead_id}/workspace")
-        self.assertEqual(workspace.status_code, 404)
-        self.assertEqual(workspace.json(), {"detail": "Lead not found"})
+        dismissed = self.client.get("/api/leads", params={"view": "dismissed"})
+        self.assertEqual(dismissed.status_code, 200)
+        self.assertEqual(dismissed.json()[0]["id"], deleted_lead_id)
 
-        generation = self._request_job(archived_lead_id)
-        self.assertEqual(generation.status_code, 404)
-        self.assertEqual(generation.json(), {"detail": "Lead not found"})
+        workspace = self.client.get(f"/api/leads/{deleted_lead_id}/workspace")
+        self.assertEqual(workspace.status_code, 200)
+        self.assertEqual(workspace.json()["lead"]["review_status"], "deleted")
 
-        archive_again = self.client.delete(f"/api/leads/{archived_lead_id}")
-        self.assertEqual(archive_again.status_code, 404)
-        self.assertEqual(archive_again.json(), {"detail": "Lead not found"})
+        generation = self._request_job(deleted_lead_id)
+        self.assertEqual(generation.status_code, 409)
+        self.assertEqual(generation.json()["detail"]["code"], "lead_inactive")
 
-        with self.session_factory() as db:
-            archived = db.get(Lead, archived_lead_id)
-            self.assertIsNotNone(archived.archived_at)
+        local_delete = self.client.delete(f"/api/leads/{deleted_lead_id}")
+        self.assertEqual(local_delete.status_code, 405)
 
 
 if __name__ == "__main__":
