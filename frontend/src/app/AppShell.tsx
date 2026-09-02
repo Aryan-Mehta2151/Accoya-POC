@@ -28,6 +28,14 @@ const NAV_ITEMS = [
   { to: '/assistant', label: 'Assistant', icon: Bot },
 ];
 
+function lastOpportunitiesPath(): string {
+  try {
+    return window.sessionStorage.getItem('accoya-opportunities-last-url') || '/opportunities';
+  } catch {
+    return '/opportunities';
+  }
+}
+
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
     <NavLink className={styles.brand} to='/' aria-label='Accoya Outreach home'>
@@ -62,7 +70,7 @@ function Navigation({ compact = false, onNavigate }: { compact?: boolean; onNavi
       {NAV_ITEMS.map(({ to, label, icon: Icon, end }) => (
         <NavLink
           key={to}
-          to={to}
+          to={to === '/opportunities' ? lastOpportunitiesPath() : to}
           end={end}
           onClick={onNavigate}
           onPointerEnter={() => prefetchRoute(to)}

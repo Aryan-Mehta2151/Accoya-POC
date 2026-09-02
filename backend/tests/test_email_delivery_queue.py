@@ -265,15 +265,10 @@ class EmailDeliveryQueueTests(unittest.TestCase):
             self.assertEqual(
                 job.body_snapshot,
                 "Would a short technical review be useful?\n\n"
-                "Doug Gillikin\n"
-                "Specification Manager (Associate AIA)\n"
-                "Accsys\n\n"
-                "Accsys Sales Office\n"
-                "Accoya USA\n"
-                "Building 470,\n"
-                "200 S Wilcox Dr.\n"
-                "Kingsport, TN\n"
-                "37660-5147",
+                "ARTURO LUGO\n"
+                "NORTH AMERICA ARCHITECTURE SEGMENT MANAGER\n"
+                "Accsys Technologies, Building 470, 200 S Wilcox Dr, "
+                "Kingsport, TN 37660-5147",
             )
 
     def test_enqueue_requires_current_approved_unchanged_valid_content(self) -> None:

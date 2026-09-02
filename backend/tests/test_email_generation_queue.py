@@ -38,7 +38,7 @@ from app.db.models import (
     Lead,
     LeadReviewStatus,
 )
-from app.email_signature import DEFAULT_US_EMAIL_SIGNATURE
+from app.email_signature import DEFAULT_NL_EMAIL_SIGNATURE, DEFAULT_US_EMAIL_SIGNATURE
 from app.services import email_generation_service
 from app.workers import email_generation as email_generation_worker
 
@@ -300,7 +300,7 @@ class EmailGenerationQueueTests(unittest.TestCase):
             self.assertIsNone(event.previous_status)
             self.assertEqual(event.new_status, EmailStatus.pending_review)
 
-    def test_non_us_generated_draft_starts_without_a_signature(self) -> None:
+    def test_netherlands_generated_draft_starts_with_the_nl_signature(self) -> None:
         lead_id = self._seed_lead("netherlands-signature", state="NL")
         self._enqueue(lead_id)
         claim = self._claim("netherlands-worker")
@@ -314,7 +314,7 @@ class EmailGenerationQueueTests(unittest.TestCase):
             email = db.scalar(
                 select(Email).where(Email.agent_run_id == claim.run_id)
             )
-            self.assertIsNone(email.signature)
+            self.assertEqual(email.signature, DEFAULT_NL_EMAIL_SIGNATURE)
 
     def test_signature_policy_is_snapshotted_when_generation_is_claimed(self) -> None:
         lead_id = self._seed_lead("signature-state-race", state="OR")

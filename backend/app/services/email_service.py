@@ -11,7 +11,11 @@ from email.utils import format_datetime, make_msgid
 from html import escape
 
 from app.config import Settings, get_settings
-from app.email_signature import DEFAULT_US_EMAIL_SIGNATURE, signature_html_for
+from app.email_signature import (
+    DEFAULT_EMAIL_SIGNATURES,
+    DEFAULT_US_EMAIL_SIGNATURE,
+    signature_html_for,
+)
 
 
 class EmailDeliveryFailure(RuntimeError):
@@ -87,16 +91,21 @@ def _render_outreach_html(body: str) -> str:
     """Render a safe HTML version of the approved outreach content.
 
     The stored body remains the canonical plain text; this only affects how the
-    message is displayed by HTML-capable clients. Only the known US signature
-    is replaced by a structured HTML signature block.
+    message is displayed by HTML-capable clients. Known market signatures are
+    replaced by their structured HTML signature blocks.
     """
 
     normalized = body.replace("\r\n", "\n")
 
     signature_html = ""
     message_text = normalized
-    marker = DEFAULT_US_EMAIL_SIGNATURE.strip()
-    index = normalized.rfind(marker)
+    index, marker = max(
+        (
+            (normalized.rfind(signature.strip()), signature.strip())
+            for signature in DEFAULT_EMAIL_SIGNATURES
+        ),
+        key=lambda match: match[0],
+    )
     if index != -1:
         structured = signature_html_for(marker)
         if structured is not None:

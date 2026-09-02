@@ -276,20 +276,31 @@
 }
 
 .clearButton {
-  min-height: 2.5rem;
-  padding-inline: 0.6rem;
-  color: var(--color-forest, #174a36);
-  background: transparent;
+  min-height: 2.75rem;
+  padding-inline: 0.95rem;
+  color: var(--color-ink, #17211b);
+  background: var(--color-paper, #fbfaf6);
+  border-color: rgb(23 33 27 / 16%);
 }
 
-.clearButton:hover {
-  text-decoration: underline;
+.clearButton:hover:not(:disabled) {
+  border-color: rgb(23 74 54 / 40%);
+  background: #fff;
 }
 
 .primaryButton:disabled,
 .secondaryButton:disabled {
   cursor: wait;
   opacity: 0.6;
+  transform: none;
+}
+
+.clearButton:disabled {
+  cursor: default;
+  opacity: 0.55;
+  color: rgb(23 33 27 / 46%);
+  border-color: rgb(23 33 27 / 10%);
+  background: rgb(247 245 239 / 85%);
   transform: none;
 }
 
@@ -310,7 +321,7 @@
   margin-top: 2.2rem;
   padding: 0.85rem;
   display: grid;
-  grid-template-columns: minmax(14rem, 1fr) repeat(3, minmax(8rem, 0.3fr)) auto auto;
+  grid-template-columns: minmax(14rem, 1fr) repeat(2, minmax(8rem, 0.3fr)) auto auto;
   gap: 0.65rem;
   align-items: end;
   border: 1px solid rgb(23 33 27 / 10%);

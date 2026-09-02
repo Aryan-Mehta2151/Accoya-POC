@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, ArrowLeft, CalendarDays, ExternalLink, Mail, MapPin, Pencil, Save, X } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useLocation, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { EmptyState, ErrorState, LoadingState, PageHeader } from '../../components/ui';
@@ -193,6 +193,17 @@ function ContactCard({ lead, readOnly = false }: { lead: Lead; readOnly?: boolea
 
 export function OpportunityDetailPage() {
   const { leadId } = useParams<{ leadId: string }>();
+  const location = useLocation();
+  const storedOpportunitiesUrl = (() => {
+    try {
+      return window.sessionStorage.getItem('accoya-opportunities-last-url');
+    } catch {
+      return null;
+    }
+  })();
+  const backHref = storedOpportunitiesUrl
+    || (location.state as { from?: string } | null)?.from
+    || '/opportunities';
   const workspaceQuery = useQuery({
     queryKey: queryKeys.leadWorkspace(leadId ?? ''),
     queryFn: () => api.getLeadWorkspace(leadId!),
@@ -212,7 +223,7 @@ export function OpportunityDetailPage() {
           <EmptyState
             title='Opportunity not found'
             description='It may have been removed or the link may be out of date.'
-            action={<Link className={styles.primaryButton} to='/opportunities'>Back to opportunities</Link>}
+            action={<Link className={styles.primaryButton} to={backHref}>Back to opportunities</Link>}
           />
         </div>
       );
@@ -235,7 +246,7 @@ export function OpportunityDetailPage() {
 
   return (
     <div className={styles.page}>
-      <Link className={styles.backLink} to='/opportunities'>
+      <Link className={styles.backLink} to={backHref}>
         <ArrowLeft aria-hidden='true' size={16} /> All opportunities
       </Link>
 

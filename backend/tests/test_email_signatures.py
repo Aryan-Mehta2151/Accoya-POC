@@ -1,4 +1,4 @@
-"""Offline tests for US signature selection and plain-text rendering."""
+"""Offline tests for market signature selection and plain-text rendering."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import unittest
 
 from app.email_content import email_content_hash, render_outreach_body
 from app.email_signature import (
+    DEFAULT_NL_EMAIL_SIGNATURE,
     DEFAULT_US_EMAIL_SIGNATURE,
     US_STATE_CODES,
     default_signature_for_state,
@@ -29,10 +30,17 @@ class EmailSignaturePolicyTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue(is_us_opportunity_state(name))
 
-    def test_non_us_unknown_and_territory_values_do_not_receive_default(self) -> None:
-        for value in (None, "", "NL", "Netherlands", "PR", "GU", "XX"):
+    def test_netherlands_opportunities_receive_the_nl_default(self) -> None:
+        for value in ("NL", "Netherlands", "the Netherlands", "Nederland"):
             with self.subTest(value=value):
-                self.assertFalse(is_us_opportunity_state(value))
+                self.assertEqual(
+                    default_signature_for_state(value),
+                    DEFAULT_NL_EMAIL_SIGNATURE,
+                )
+
+    def test_unknown_and_territory_values_do_not_receive_default(self) -> None:
+        for value in (None, "", "PR", "GU", "XX"):
+            with self.subTest(value=value):
                 self.assertIsNone(default_signature_for_state(value))
 
     def test_renderer_and_hash_use_the_complete_plain_text_message(self) -> None:
@@ -49,7 +57,7 @@ class EmailSignaturePolicyTests(unittest.TestCase):
         )
         self.assertNotEqual(without_signature, with_signature)
 
-    def test_effective_signature_falls_back_to_default_for_us_only(self) -> None:
+    def test_effective_signature_falls_back_to_market_default(self) -> None:
         self.assertEqual(
             effective_signature_for_state(None, "OR"),
             DEFAULT_US_EMAIL_SIGNATURE,
@@ -58,9 +66,13 @@ class EmailSignaturePolicyTests(unittest.TestCase):
             effective_signature_for_state(" Custom ", "OR"),
             " Custom ",
         )
-        self.assertIsNone(effective_signature_for_state(None, "NL"))
-        self.assertIsNone(
-            effective_signature_for_state("Legacy signature", "NL")
+        self.assertEqual(
+            effective_signature_for_state(None, "NL"),
+            DEFAULT_NL_EMAIL_SIGNATURE,
+        )
+        self.assertEqual(
+            effective_signature_for_state(" Custom ", "NL"),
+            " Custom ",
         )
 
 

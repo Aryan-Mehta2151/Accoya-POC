@@ -9,6 +9,7 @@ from email.message import EmailMessage
 from unittest.mock import patch
 
 from app.config import Settings
+from app.email_signature import DEFAULT_NL_EMAIL_SIGNATURE
 from app.services import email_service
 
 
@@ -161,14 +162,25 @@ class EmailSmtpTests(unittest.TestCase):
         html_part = message.get_body(preferencelist=("html",))
         self.assertIsNotNone(html_part)
         html_body = html_part.get_content()
-        self.assertIn("Doug Gillikin", html_body)
-        self.assertIn("Specification Manager (Associate AIA)", html_body)
+        self.assertIn("ARTURO LUGO", html_body)
+        self.assertIn("NORTH AMERICA ARCHITECTURE SEGMENT MANAGER", html_body)
         self.assertIn("Kingsport, TN 37660-5147", html_body)
         self.assertIn("border-left:4px solid #0f766e", html_body)
         self.assertIn("width:44px;height:2px;background:#5f6b66", html_body)
         self.assertIn("Thank you for reviewing the proposal.", html_body)
         self.assertIn('padding:0 20px', html_body)
         self.assertNotIn('max-width:600px', html_body)
+
+    def test_nl_signature_uses_the_structured_html_signature(self) -> None:
+        html_body = email_service._render_outreach_html(
+            "Beste team,\n\nDank voor uw tijd.\n\n"
+            + DEFAULT_NL_EMAIL_SIGNATURE
+        )
+
+        self.assertIn("LAURA KEILY", html_body)
+        self.assertIn("HEAD OF MARKETING", html_body)
+        self.assertIn("4th Floor, 3 Moorgate Place, London, EC2R 6EA", html_body)
+        self.assertIn("border-left:4px solid #0f766e", html_body)
 
     def test_unsigned_non_us_body_keeps_its_closing_as_normal_content(self) -> None:
         html_body = email_service._render_outreach_html(

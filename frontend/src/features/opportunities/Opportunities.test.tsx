@@ -136,7 +136,7 @@ const deliveryJob = (overrides: Partial<EmailDeliveryJob> = {}): EmailDeliveryJo
 const workspace = (overrides: Partial<LeadWorkspace> = {}): LeadWorkspace => ({
   lead: lead(),
   emails: [email()],
-  default_email_signature: 'Doug Gillikin\nAccsys',
+  default_email_signature: 'ARTURO LUGO\nAccsys Technologies',
   current_email_id: 'email-1',
   current_email_is_stale: false,
   latest_generation: job({ status: 'generated', completed_at: '2026-07-02T00:01:00Z' }),

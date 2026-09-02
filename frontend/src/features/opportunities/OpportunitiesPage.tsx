@@ -12,7 +12,7 @@ import {
   Search,
   Sparkles,
 } from "lucide-react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import { EmptyState, ErrorState, LoadingState, PageHeader, StatusBadge } from "../../components/ui";
@@ -326,6 +326,7 @@ function OpportunityOutreachBadges({ lead }: { lead: Lead }) {
 }
 
 function OpportunityCard({ lead }: { lead: Lead }) {
+  const location = useLocation();
   return (
     <article className={styles.mobileCard}>
       <div className={styles.mobileCardTopline}>
@@ -338,7 +339,7 @@ function OpportunityCard({ lead }: { lead: Lead }) {
       </div>
       <div>
         <h2 className={styles.mobileCardTitle}>
-          <Link to={`/opportunities/${lead.id}`}>{displayValue(lead.project)}</Link>
+          <Link to={`/opportunities/${lead.id}`} state={{ from: `${location.pathname}${location.search}` }}>{displayValue(lead.project)}</Link>
         </h2>
         <p className={styles.locationLine}>
           <MapPin aria-hidden="true" size={15} />
@@ -367,7 +368,7 @@ function OpportunityCard({ lead }: { lead: Lead }) {
         </div>
       </dl>
       <div className={styles.cardActions}>
-        <Link className={styles.cardLink} to={`/opportunities/${lead.id}`}>
+        <Link className={styles.cardLink} to={`/opportunities/${lead.id}`} state={{ from: `${location.pathname}${location.search}` }}>
           View opportunity <span aria-hidden="true">→</span>
         </Link>
       </div>
@@ -377,6 +378,7 @@ function OpportunityCard({ lead }: { lead: Lead }) {
 
 export function OpportunitiesPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const [searchInput, setSearchInput] = useState(() => searchParams.get("q") ?? "");
@@ -387,10 +389,21 @@ export function OpportunitiesPage() {
   >(undefined);
   const pendingAutomaticSyncRefreshRef = useRef<string | null>(null);
 
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(
+        "accoya-opportunities-last-url",
+        `${location.pathname}${location.search}`,
+      );
+    } catch {
+      // Storage may be unavailable in hardened browser modes; the nav link
+      // simply falls back to the plain, unfiltered opportunities list.
+    }
+  }, [location.pathname, location.search]);
+
   const search = searchParams.get("q") ?? "";
   const view: LeadView = searchParams.get("view") === "dismissed" ? "dismissed" : "active";
   const state = searchParams.get("state") ?? "";
-  const timing = searchParams.get("timing") ?? "";
   const outreachParam = searchParams.get("outreach") ?? "";
   const outreach: OutreachFilter = outreachOptions.some((option) => option.value === outreachParam)
     ? outreachParam as OutreachFilter
@@ -489,17 +502,15 @@ export function OpportunitiesPage() {
 
   const leads = useMemo(() => leadsQuery.data ?? [], [leadsQuery.data]);
   const stateOptions = useMemo(() => uniqueOptions(leads.map((lead) => lead.state)), [leads]);
-  const timingOptions = useMemo(() => uniqueOptions(leads.map((lead) => lead.timing)), [leads]);
 
   const filteredLeads = useMemo(() => {
     const needle = searchInput.trim().toLocaleLowerCase();
     return leads
       .filter((lead) => !needle || leadSearchText(lead).includes(needle))
       .filter((lead) => !state || lead.state === state)
-      .filter((lead) => !timing || lead.timing === timing)
       .filter((lead) => matchesOutreachFilter(lead, outreach))
       .sort((a, b) => compareLeads(a, b, opportunitySort));
-  }, [leads, opportunitySort, outreach, searchInput, state, timing]);
+  }, [leads, opportunitySort, outreach, searchInput, state]);
 
   const updateParam = (name: string, value: string) => {
     const next = new URLSearchParams(searchParams);
@@ -512,7 +523,7 @@ export function OpportunitiesPage() {
     setSearchInput("");
     setSearchParams(view === "dismissed" ? { view: "dismissed" } : {}, { replace: true });
   };
-  const hasFilters = Boolean(searchInput || state || timing || outreach || searchParams.has("sort"));
+  const hasFilters = Boolean(searchInput || state || outreach || searchParams.has("sort"));
   const isMutating = syncMutation.isPending || uploadMutation.isPending;
   const automaticSyncActive = automaticSyncIsActive(latestAutomaticRun?.status);
   const manualSyncDisabled = isMutating || automaticSyncActive;
@@ -676,16 +687,6 @@ export function OpportunitiesPage() {
             </label>
 
             <label className={styles.selectField}>
-              <span>Timing</span>
-              <select value={timing} onChange={(event) => updateParam("timing", event.target.value)}>
-                <option value="">All timing</option>
-                {timingOptions.map((option) => (
-                  <option key={option} value={option}>{option}</option>
-                ))}
-              </select>
-            </label>
-
-            <label className={styles.selectField}>
               <span>Outreach</span>
               <select value={outreach} onChange={(event) => updateParam("outreach", event.target.value)}>
                 {outreachOptions.map((option) => (
@@ -694,11 +695,15 @@ export function OpportunitiesPage() {
               </select>
             </label>
 
-            {hasFilters ? (
-              <button className={styles.clearButton} type="button" onClick={clearFilters}>
-                Clear
-              </button>
-            ) : null}
+            <button
+              className={styles.clearButton}
+              type="button"
+              onClick={clearFilters}
+              disabled={!hasFilters}
+              aria-disabled={!hasFilters}
+            >
+              Clear
+            </button>
           </section>
 
           <div className={styles.resultSummary} aria-live="polite">
@@ -793,11 +798,11 @@ export function OpportunitiesPage() {
                         className={styles.clickableRow}
                         tabIndex={0}
                         aria-label={`Open opportunity ${displayValue(lead.project)}`}
-                        onClick={() => navigate(`/opportunities/${lead.id}`)}
+                        onClick={() => navigate(`/opportunities/${lead.id}`, { state: { from: `${location.pathname}${location.search}` } })}
                         onKeyDown={(event) => {
                           if (event.key === "Enter" || event.key === " ") {
                             event.preventDefault();
-                            navigate(`/opportunities/${lead.id}`);
+                            navigate(`/opportunities/${lead.id}`, { state: { from: `${location.pathname}${location.search}` } });
                           }
                         }}
                       >
