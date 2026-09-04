@@ -37,7 +37,7 @@ The frontend intentionally does not expose agent runs, model details, prompt ver
 
 Each generated draft snapshots the opportunity's recipient address. The To field remains editable, including when the opportunity has no address; changing an approved recipient or message returns the draft to review. Send Email is available only for the current approved draft, confirms the exact recipient and subject, and submits an authenticated durable delivery request. The browser polls queued/running deliveries and distinguishes confirmed relay acceptance, definite failure, and an unknown outcome. Unknown deliveries are never resent automatically because the first attempt may already have been accepted; an explicit resend requires acknowledging the duplicate risk.
 
-The separately started backend delivery worker performs SMTP delivery. A `sent` state means the configured SMTP relay accepted the message, not that it reached the recipient's inbox. Starting that worker can send live external email; automated frontend tests mock delivery and never contact SMTP. Uploading a strategy document stores it, but the backend does not expose knowledge-base ingestion status.
+The separately started backend delivery worker performs Microsoft Graph delivery. A `sent` state means Graph accepted the message, not that it reached the recipient's inbox. Starting that worker can send live external email; automated frontend tests mock delivery and never contact Microsoft Graph. Uploading a strategy document stores it, but the backend does not expose knowledge-base ingestion status.
 
 ## Architecture
 

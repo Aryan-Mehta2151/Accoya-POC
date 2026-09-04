@@ -74,7 +74,7 @@ class EmailDeliveryJobNotRunningError(RuntimeError):
 
 @dataclass(frozen=True)
 class ClaimedEmailDelivery:
-    """Detached SMTP input returned after the claim transaction commits."""
+    """Detached email input returned after the claim transaction commits."""
 
     job_id: str
     email_id: str
@@ -90,20 +90,20 @@ DeliveryTransport = Callable[..., None]
 
 
 def delivery_configuration_error(settings: Settings) -> str | None:
-    """Return a safe configuration code, or None when SMTP is usable."""
+    """Return a safe configuration code, or None when Graph mail is usable."""
 
-    if not settings.smtp_host.strip():
-        return "smtp_host_missing"
-    if not 1 <= settings.smtp_port <= 65535:
-        return "smtp_port_invalid"
+    if not settings.microsoft_client_id.strip():
+        return "microsoft_client_id_missing"
+    if not settings.microsoft_tenant_id.strip():
+        return "microsoft_tenant_id_missing"
+    if not settings.microsoft_client_secret.strip():
+        return "microsoft_client_secret_missing"
     try:
-        validate_email(settings.smtp_email.strip(), check_deliverability=False)
+        validate_email(str(settings.microsoft_sender_email).strip(), check_deliverability=False)
     except EmailNotValidError:
-        return "smtp_sender_invalid"
-    if not settings.smtp_password.strip():
-        return "smtp_password_missing"
-    if settings.smtp_timeout_seconds <= 0:
-        return "smtp_timeout_invalid"
+        return "microsoft_sender_invalid"
+    if settings.microsoft_graph_timeout_seconds <= 0:
+        return "microsoft_graph_timeout_invalid"
     return None
 
 
@@ -117,7 +117,7 @@ def enqueue_delivery(
     requested_by: str,
     sender_email: str,
 ) -> EmailDeliveryJob:
-    """Idempotently queue an approved current email for SMTP delivery."""
+    """Idempotently queue an approved current email for delivery."""
 
     try:
         canonical_email_id = _canonical_uuid(email_id)
@@ -404,7 +404,7 @@ def heartbeat_job(db: Session, *, job_id: str, worker_id: str) -> bool:
 
 
 def recover_stale_jobs(db: Session, *, stale_after_seconds: float) -> int:
-    """Mark expired running SMTP attempts unknown; never replay them."""
+    """Mark expired running delivery attempts unknown; never replay them."""
 
     if stale_after_seconds <= 0:
         raise ValueError("stale_after_seconds must be positive")
@@ -442,7 +442,7 @@ def execute_claimed_job(
     settings: Settings,
     transport: DeliveryTransport | None = None,
 ) -> EmailDeliveryJob:
-    """Call SMTP outside a transaction, then atomically finalize the outcome."""
+    """Call the mail provider outside a transaction, then finalize outcome."""
 
     deliver = transport or email_service.send_outreach_email
     try:
@@ -568,7 +568,7 @@ def _finalize_success(
         )
     db.commit()
     logger.info(
-        "Email delivery accepted by the SMTP relay",
+        "Email delivery accepted by Microsoft Graph",
         extra={"email_delivery_job_id": claim.job_id},
     )
     return job

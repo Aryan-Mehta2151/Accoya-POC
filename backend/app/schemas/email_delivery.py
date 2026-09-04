@@ -28,7 +28,7 @@ class EmailDeliveryRequest(BaseModel):
 
 
 class EmailDeliveryJobRead(BaseModel):
-    """Safe representation of one durable SMTP delivery attempt."""
+    """Safe representation of one durable email delivery attempt."""
 
     model_config = ConfigDict(from_attributes=True)
 

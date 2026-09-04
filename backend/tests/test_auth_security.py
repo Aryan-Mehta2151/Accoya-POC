@@ -391,20 +391,20 @@ class AuthApiTests(unittest.TestCase):
         self.assertIn("Password reset email delivery failed", rendered)
         self.assertNotIn("approved@example.com", rendered)
 
-    def test_forgot_password_closes_transaction_before_smtp(self) -> None:
+    def test_forgot_password_closes_transaction_before_mail_delivery(self) -> None:
         user = self._create_user()
         csrf = self._csrf()
         expiring_sessions = sessionmaker(bind=self.engine)
         observed_sessions = []
-        smtp_transaction_states: list[bool] = []
+        mail_transaction_states: list[bool] = []
 
         def override_db():
             with expiring_sessions() as db:
                 observed_sessions.append(db)
                 yield db
 
-        def observe_smtp(_email: str, _link: str) -> bool:
-            smtp_transaction_states.append(observed_sessions[0].in_transaction())
+        def observe_mail_delivery(_email: str, _link: str) -> bool:
+            mail_transaction_states.append(observed_sessions[0].in_transaction())
             return True
 
         original_override = self.app.dependency_overrides[get_db]
@@ -413,7 +413,7 @@ class AuthApiTests(unittest.TestCase):
             with patch.object(
                 auth,
                 "send_password_reset_email",
-                side_effect=observe_smtp,
+                side_effect=observe_mail_delivery,
             ):
                 response = self.client.post(
                     "/api/auth/forgot-password",
@@ -424,7 +424,7 @@ class AuthApiTests(unittest.TestCase):
             self.app.dependency_overrides[get_db] = original_override
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(smtp_transaction_states, [False])
+        self.assertEqual(mail_transaction_states, [False])
 
     def test_request_access_requires_csrf_and_sends_approver_email(self) -> None:
         missing = self.client.post(
@@ -1010,8 +1010,9 @@ class AuthConfigurationAndAdminTests(unittest.TestCase):
             google_client_id="",
             google_client_secret="",
             cors_allowed_origins=["https://app.example.com"],
-            smtp_email="",
-            smtp_password="",
+            microsoft_client_id="",
+            microsoft_tenant_id="",
+            microsoft_client_secret="",
         )
         with self.assertRaisesRegex(RuntimeError, "Google credentials"):
             validate_web_auth_settings(incomplete_production)
@@ -1038,8 +1039,10 @@ class AuthConfigurationAndAdminTests(unittest.TestCase):
             google_client_id="production-client",
             google_client_secret="production-secret",
             cors_allowed_origins=["https://app.example.com"],
-            smtp_email="mailer@example.com",
-            smtp_password="smtp-secret",
+            microsoft_client_id="production-client",
+            microsoft_tenant_id="production-tenant",
+            microsoft_client_secret="production-secret",
+            microsoft_sender_email="mailer@example.com",
         )
         with self.assertRaisesRegex(RuntimeError, "same hostname"):
             validate_web_auth_settings(cross_site)

@@ -1,4 +1,4 @@
-"""Poll and execute durable SMTP delivery jobs.
+"""Poll and execute durable email delivery jobs.
 
 Run from the backend directory with python -m app.workers.email_delivery.
 """
@@ -76,7 +76,7 @@ def run_worker(
     )
     if configuration_error is not None:
         logger.error(
-            "Email delivery worker is disabled because SMTP is not configured",
+            "Email delivery worker is disabled because Microsoft Graph is not configured",
             extra={"configuration_error": configuration_error},
         )
         return 2

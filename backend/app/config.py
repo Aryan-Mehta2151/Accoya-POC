@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     email_generation_heartbeat_seconds: float = 15.0
     email_generation_stale_seconds: float = 300.0
 
-    # Durable SMTP delivery worker
+    # Durable email delivery worker
     email_delivery_worker_poll_seconds: float = 2.0
     email_delivery_heartbeat_seconds: float = 15.0
     email_delivery_stale_seconds: float = 300.0
@@ -93,14 +93,12 @@ class Settings(BaseSettings):
     access_request_cooldown_minutes: int = 15
     access_request_approver_email: EmailStr = "aryanmehta2151@gmail.com"
 
-    # SMTP
-    smtp_host: str = "smtp.gmail.com"
-    smtp_port: int = 587
-    smtp_username: str | None = None
-    smtp_email: str = ""
-    smtp_password: str = ""
-
-    smtp_timeout_seconds: float = 30.0
+    # Microsoft Graph mail delivery
+    microsoft_client_id: str = ""
+    microsoft_tenant_id: str = ""
+    microsoft_client_secret: str = ""
+    microsoft_sender_email: EmailStr = "accoya@ampedstrategy.com"
+    microsoft_graph_timeout_seconds: float = 30.0
 
     # Frontend URL (for reset password links)
     frontend_url: str = "http://localhost:5173"

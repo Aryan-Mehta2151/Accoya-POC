@@ -1,4 +1,4 @@
-"""Provider-free tests for durable SMTP outreach delivery."""
+"""Provider-free tests for durable outreach delivery."""
 
 from __future__ import annotations
 
@@ -46,11 +46,11 @@ class EmailDeliveryQueueTests(unittest.TestCase):
             expire_on_commit=False,
         )
         self.settings = Settings(
-            smtp_host="smtp.example.com",
-            smtp_port=587,
-            smtp_email="sender@example.com",
-            smtp_password="offline-secret",
-            smtp_timeout_seconds=10,
+            microsoft_client_id="client-id",
+            microsoft_tenant_id="tenant-id",
+            microsoft_client_secret="offline-secret",
+            microsoft_sender_email="sender@example.com",
+            microsoft_graph_timeout_seconds=10,
         )
         self.requester_id = str(uuid.uuid4())
 
@@ -139,7 +139,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                 or email.delivery_content_hash,
                 acknowledge_duplicate_risk=acknowledge_duplicate_risk,
                 requested_by=self.requester_id,
-                sender_email=self.settings.smtp_email,
+                sender_email=str(self.settings.microsoft_sender_email),
             )
             return str(job.id)
 
@@ -285,7 +285,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                     expected_content_hash=email.delivery_content_hash,
                     acknowledge_duplicate_risk=False,
                     requested_by=self.requester_id,
-                    sender_email=self.settings.smtp_email,
+                    sender_email=str(self.settings.microsoft_sender_email),
                 )
             self.assertEqual(raised.exception.code, "email_not_approved")
 
@@ -301,7 +301,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                     expected_content_hash="f" * 64,
                     acknowledge_duplicate_risk=False,
                     requested_by=self.requester_id,
-                    sender_email=self.settings.smtp_email,
+                    sender_email=str(self.settings.microsoft_sender_email),
                 )
             self.assertEqual(raised.exception.code, "content_changed")
 
@@ -321,7 +321,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                     expected_content_hash=email.delivery_content_hash,
                     acknowledge_duplicate_risk=False,
                     requested_by=self.requester_id,
-                    sender_email=self.settings.smtp_email,
+                    sender_email=str(self.settings.microsoft_sender_email),
                 )
             self.assertEqual(raised.exception.code, "recipient_invalid")
 
@@ -353,7 +353,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                     expected_content_hash=email.delivery_content_hash,
                     acknowledge_duplicate_risk=False,
                     requested_by=self.requester_id,
-                    sender_email=self.settings.smtp_email,
+                    sender_email=str(self.settings.microsoft_sender_email),
                 )
             self.assertEqual(raised.exception.code, "generation_active")
 
@@ -452,7 +452,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
         claim = self._claim()
 
         def rejected_transport(**_: object) -> None:
-            raise email_service.EmailDeliveryFailure("smtp_recipient_refused")
+            raise email_service.EmailDeliveryFailure("microsoft_graph_message_rejected")
 
         with self.session_factory() as db:
             failed = email_delivery_service.execute_claimed_job(
@@ -462,7 +462,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                 transport=rejected_transport,
             )
             self.assertEqual(failed.status, EmailDeliveryJobStatus.failed)
-            self.assertEqual(failed.error_code, "smtp_recipient_refused")
+            self.assertEqual(failed.error_code, "microsoft_graph_message_rejected")
         with self.session_factory() as db:
             self.assertEqual(db.get(Email, email_id).status, EmailStatus.approved)
 
@@ -479,7 +479,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
 
         def uncertain_transport(**_: object) -> None:
             raise email_service.EmailDeliveryUnknown(
-                "smtp_submission_interrupted"
+                "microsoft_graph_submission_interrupted"
             )
 
         with self.session_factory() as db:
@@ -511,7 +511,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                     expected_content_hash=email.delivery_content_hash,
                     acknowledge_duplicate_risk=False,
                     requested_by=self.requester_id,
-                    sender_email=self.settings.smtp_email,
+                    sender_email=str(self.settings.microsoft_sender_email),
                 )
             self.assertEqual(
                 raised.exception.code,
@@ -530,7 +530,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                 claim=retry_claim,
                 settings=self.settings,
                 transport=lambda **_: (_ for _ in ()).throw(
-                    email_service.EmailDeliveryFailure("smtp_data_rejected")
+                    email_service.EmailDeliveryFailure("microsoft_graph_message_rejected")
                 ),
             )
         with self.session_factory() as db:
@@ -545,7 +545,7 @@ class EmailDeliveryQueueTests(unittest.TestCase):
                     expected_content_hash=email.delivery_content_hash,
                     acknowledge_duplicate_risk=False,
                     requested_by=self.requester_id,
-                    sender_email=self.settings.smtp_email,
+                    sender_email=str(self.settings.microsoft_sender_email),
                 )
             self.assertEqual(
                 raised.exception.code,
@@ -614,11 +614,11 @@ class EmailDeliveryQueueTests(unittest.TestCase):
 
 
 class EmailDeliveryWorkerConfigurationTests(unittest.TestCase):
-    def test_invalid_smtp_exits_before_claiming(self) -> None:
+    def test_invalid_graph_config_exits_before_claiming(self) -> None:
         settings = Settings(
-            smtp_host="",
-            smtp_email="",
-            smtp_password="",
+            microsoft_client_id="",
+            microsoft_tenant_id="",
+            microsoft_client_secret="",
         )
         with patch.object(email_delivery_worker, "_claim_one") as claim_one:
             exit_code = email_delivery_worker.run_worker(settings=settings)
@@ -627,11 +627,11 @@ class EmailDeliveryWorkerConfigurationTests(unittest.TestCase):
 
     def test_stale_threshold_must_exceed_heartbeat(self) -> None:
         settings = Settings(
-            smtp_host="smtp.example.com",
-            smtp_port=587,
-            smtp_email="sender@example.com",
-            smtp_password="offline-secret",
-            smtp_timeout_seconds=10,
+            microsoft_client_id="client-id",
+            microsoft_tenant_id="tenant-id",
+            microsoft_client_secret="offline-secret",
+            microsoft_sender_email="sender@example.com",
+            microsoft_graph_timeout_seconds=10,
             email_delivery_heartbeat_seconds=30,
             email_delivery_stale_seconds=30,
         )
@@ -642,11 +642,11 @@ class EmailDeliveryWorkerConfigurationTests(unittest.TestCase):
 
     def test_pre_stopped_worker_does_not_touch_queue(self) -> None:
         settings = Settings(
-            smtp_host="smtp.example.com",
-            smtp_port=587,
-            smtp_email="sender@example.com",
-            smtp_password="offline-secret",
-            smtp_timeout_seconds=10,
+            microsoft_client_id="client-id",
+            microsoft_tenant_id="tenant-id",
+            microsoft_client_secret="offline-secret",
+            microsoft_sender_email="sender@example.com",
+            microsoft_graph_timeout_seconds=10,
         )
         stopped = threading.Event()
         stopped.set()

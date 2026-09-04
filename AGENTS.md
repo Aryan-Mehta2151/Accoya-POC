@@ -20,9 +20,9 @@ manually and through a durable daily-midnight scheduler, stores them as leads,
 uploads marketing strategy documents to S3, retrieves
 strategy and nurturing context through an AWS Bedrock Knowledge Base, generates
 outreach emails through a LangGraph/Gemini agent, supports a human-review status
-workflow and durable SMTP delivery, and exposes a knowledge-base chatbot. New
+workflow and durable Microsoft Graph delivery, and exposes a knowledge-base chatbot. New
 leads durably queue their first email for a separate generation worker, while
-approved messages queue delivery for a separate SMTP worker. A React SPA provides Overview,
+approved messages queue delivery for a separate Graph delivery worker. A React SPA provides Overview,
 Opportunities with inline outreach review, Strategy Docs, and Chatbot tabs.
 
 The backend stack is FastAPI, Pydantic 2, synchronous SQLAlchemy 2, PostgreSQL,
@@ -48,7 +48,7 @@ TypeScript 6, Vite 8, native `fetch`, and global CSS.
 - `backend/app/workers/email_generation.py`: separately started PostgreSQL
   queue worker; the FastAPI process never performs queued provider work.
 - `backend/app/workers/email_delivery.py`: separately started PostgreSQL queue
-  worker that is solely responsible for live outreach SMTP calls.
+  worker that is solely responsible for live outreach Microsoft Graph calls.
 - `backend/app/workers/earlybid_sync.py`: separately started PostgreSQL
   scheduler/worker for current-day local-midnight EarlyBid synchronization.
 - `backend/agent/`: standalone synchronous Accoya email agent, including
@@ -110,7 +110,7 @@ password hash; password accounts require an explicit `set-password` plus
 Run one instance of each worker by default for this POC. PostgreSQL claims make
 multiple instances safe, and queued work survives process restarts. The
 generation worker exits when model configuration is incomplete, the delivery
-worker exits when SMTP or lease configuration is invalid, and the sync worker exits
+worker exits when Microsoft Graph or lease configuration is invalid, and the sync worker exits
 when EarlyBid/schedule configuration is invalid. Starting the delivery worker
 authorizes real outbound email for already queued approved messages.
 
@@ -145,7 +145,7 @@ any other tracked file.
 | Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_REQUEST_TIMEOUT_SECONDS` | Used by the worker's email agent; the timeout applies to each Gemini request. The active chat route does not use Gemini. |
 | Generation worker | `EMAIL_GENERATION_WORKER_POLL_SECONDS`, `EMAIL_GENERATION_HEARTBEAT_SECONDS`, `EMAIL_GENERATION_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. Keep the stale threshold safely above the heartbeat interval. |
 | Delivery worker | `EMAIL_DELIVERY_WORKER_POLL_SECONDS`, `EMAIL_DELIVERY_HEARTBEAT_SECONDS`, `EMAIL_DELIVERY_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. Keep stale safely above heartbeat. |
-| SMTP delivery | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_EMAIL`, `SMTP_PASSWORD`, `SMTP_TIMEOUT_SECONDS` | Required by the delivery worker; timeout defaults to 30 seconds. `SMTP_USERNAME` is the relay login and, when blank, falls back to the verified sender in `SMTP_EMAIL`. The example targets SMTP2GO on port 2525 over STARTTLS. The worker uses stable Message-IDs; a timeout may produce an unknown outcome. |
+| Microsoft Graph mail | `MICROSOFT_CLIENT_ID`, `MICROSOFT_TENANT_ID`, `MICROSOFT_CLIENT_SECRET`, `MICROSOFT_SENDER_EMAIL`, `MICROSOFT_GRAPH_TIMEOUT_SECONDS` | Required by the delivery worker; timeout defaults to 30 seconds. The sender defaults to `accoya@ampedstrategy.com`. The worker submits MIME messages through Graph `Mail.Send` and preserves stable Message-IDs; a timeout may produce an unknown outcome. |
 | Authentication | `JWT_SECRET_KEY`, `CSRF_SECRET_KEY`, `JWT_ISSUER`, `JWT_AUDIENCE`, `AUTH_COOKIE_SECURE`, `FRONTEND_URL` | Every business route requires an active user and the eight-hour JWT HttpOnly cookie; unsafe methods also require the cookie-bound CSRF header. Production startup requires explicit `APP_ENV=production`, strong secrets, canonical HTTPS URLs/CORS, secure cookies, and one frontend/API hostname for SameSite=Lax. |
 | Google OAuth | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` | Required outside development. State and PKCE protect the flow; Google never auto-provisions a user. |
 | EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Sync uses Bearer auth; reseller/client also scope derived natural identities. |
@@ -207,8 +207,8 @@ environment values.
   returns 202. It requires the current approved email, valid saved content, and
   a matching delivery-content hash. At most one queued/running job exists per
   email. The separately started worker claims with PostgreSQL `SKIP LOCKED`,
-  releases database locks before SMTP, heartbeats its lease, and atomically
-  records relay acceptance plus the `sent` status event. Definite failures
+  releases database locks before Microsoft Graph, heartbeats its lease, and atomically
+  records Graph acceptance plus the `sent` status event. Definite failures
   leave the email approved. Timeouts, submission disconnects, and stale leases
   become `delivery_unknown` and are never automatically retried; a user must
   explicitly acknowledge duplicate risk before resending.
@@ -257,7 +257,7 @@ environment values.
 - Do not hold a database transaction or row lock across Gemini/Bedrock calls.
   Preserve `SKIP LOCKED` job claiming, heartbeat/stale-job handling, one active
   job per lead, and no automatic queue-level retry.
-- Never hold a database transaction or row lock across SMTP. Preserve
+- Never hold a database transaction or row lock across Microsoft Graph. Preserve
   `SKIP LOCKED` delivery claiming, independent heartbeats, one active delivery
   per email, stable Message-IDs, exact confirmed-content snapshots, and no
   automatic replay of `delivery_unknown`. Only the delivery worker may set an
@@ -367,11 +367,11 @@ workspace ordering/staleness, all worker terminal outcomes, sync never invoking
 the provider, stale leases, and PostgreSQL concurrency/index behavior. Do not
 start the live worker as an automated smoke test.
 
-Delivery coverage must fake SMTP and include recipient default/edit/clear,
+Delivery coverage must fake Microsoft Graph and include recipient default/edit/clear,
 approval and reapproval rules, JWT enforcement, content-hash staleness,
 idempotency and concurrent enqueueing, relay acceptance, definite failure,
 unknown outcomes, stable Message-IDs, stale leases, and the absence of
-automatic resend. Never start the live delivery worker or contact SMTP in an
+automatic resend. Never start the live delivery worker or contact Microsoft Graph in an
 automated check.
 
 Scheduler coverage must use fixed clocks and fake EarlyBid responses. Cover
@@ -402,14 +402,14 @@ automated verification.
 - Document upload does not trigger a Bedrock KB ingestion job.
 - Email status changes alone do not send mail. The authenticated Send Email
   action queues a real external message, and starting the delivery worker
-  explicitly authorizes SMTP delivery. `sent` means the relay accepted the
+  explicitly authorizes Microsoft Graph delivery. `sent` means Graph accepted the
   message, not guaranteed inbox delivery; sent emails are not indexed into the
   KB. Unknown delivery is never replayed automatically because that could send
   a duplicate.
 - AWS deployment and process supervision remain out of scope. Alembic is
   configured with a clean baseline; legacy import/backfill is out of scope.
 - Deploy the database migration, web API, and all three separately supervised
-  workers together. Starting the delivery worker authorizes queued live SMTP
+  workers together. Starting the delivery worker authorizes queued live Graph
   sends. Starting the sync worker authorizes recurring live EarlyBid calls; do
   not infer authorization to replay prior dates or backfill leads.
 - EarlyBid supplies no immutable opportunity ID. Project renames or location

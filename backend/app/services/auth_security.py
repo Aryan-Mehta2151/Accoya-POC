@@ -158,14 +158,14 @@ def validate_web_auth_settings(settings: Settings) -> None:
                 "Google credentials are required outside development"
             )
         if not (
-            settings.smtp_host.strip()
-            and settings.smtp_port > 0
-            and settings.smtp_email.strip()
-            and settings.smtp_password.strip()
-            and settings.smtp_timeout_seconds > 0
+            settings.microsoft_client_id.strip()
+            and settings.microsoft_tenant_id.strip()
+            and settings.microsoft_client_secret.strip()
+            and settings.microsoft_sender_email.strip()
+            and settings.microsoft_graph_timeout_seconds > 0
         ):
             errors.append(
-                "Password-recovery SMTP must be configured outside development"
+                "Microsoft Graph mail delivery must be configured outside development"
             )
         if (
             frontend.hostname

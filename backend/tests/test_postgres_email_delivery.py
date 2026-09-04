@@ -1,8 +1,8 @@
-"""Opt-in PostgreSQL integration coverage for durable SMTP delivery.
+"""Opt-in PostgreSQL integration coverage for durable email delivery.
 
 Set ACCOYA_TEST_DATABASE_URL to an isolated PostgreSQL database whose name
 ends in _test. These tests migrate and clean only test-database application
-rows; SMTP is always replaced with an in-process fake.
+rows; the mail provider is always replaced with an in-process fake.
 """
 
 from __future__ import annotations
@@ -82,11 +82,11 @@ class PostgresEmailDeliveryTests(unittest.TestCase):
     def setUp(self) -> None:
         self._clean_rows()
         self.settings = Settings(
-            smtp_host="smtp.example.com",
-            smtp_port=587,
-            smtp_email="sender@example.com",
-            smtp_password="offline-secret",
-            smtp_timeout_seconds=10,
+            microsoft_client_id="client-id",
+            microsoft_tenant_id="tenant-id",
+            microsoft_client_secret="offline-secret",
+            microsoft_sender_email="sender@example.com",
+            microsoft_graph_timeout_seconds=10,
         )
 
     def tearDown(self) -> None:
@@ -174,7 +174,7 @@ class PostgresEmailDeliveryTests(unittest.TestCase):
                 ),
                 acknowledge_duplicate_risk=False,
                 requested_by=str(uuid.uuid4()),
-                sender_email=self.settings.smtp_email,
+                sender_email=str(self.settings.microsoft_sender_email),
             )
             return str(job.id)
 
@@ -294,7 +294,7 @@ class PostgresEmailDeliveryTests(unittest.TestCase):
                         expected_content_hash=email.delivery_content_hash,
                         acknowledge_duplicate_risk=False,
                         requested_by=str(uuid.uuid4()),
-                        sender_email=self.settings.smtp_email,
+                        sender_email=str(self.settings.microsoft_sender_email),
                     )
                     job_ids.append(str(job.id))
             except BaseException as exc:
@@ -346,7 +346,7 @@ class PostgresEmailDeliveryTests(unittest.TestCase):
         self.assertIsNotNone(claim)
 
         def reject(**_: object) -> None:
-            raise email_service.EmailDeliveryFailure("smtp_recipient_refused")
+            raise email_service.EmailDeliveryFailure("microsoft_graph_message_rejected")
 
         with self.session_factory() as db:
             email_delivery_service.execute_claimed_job(
@@ -432,7 +432,7 @@ class PostgresEmailDeliveryTests(unittest.TestCase):
                         expected_content_hash=content_hash,
                         acknowledge_duplicate_risk=False,
                         requested_by=str(uuid.uuid4()),
-                        sender_email=self.settings.smtp_email,
+                        sender_email=str(self.settings.microsoft_sender_email),
                     )
                 outcomes.append("delivery")
             except email_delivery_service.EmailDeliveryConflictError:
@@ -488,7 +488,7 @@ class PostgresEmailDeliveryTests(unittest.TestCase):
             )
         self.assertEqual(active_generations + active_deliveries, 1)
 
-    def test_smtp_success_keeps_status_event_chain_contiguous(self) -> None:
+    def test_graph_success_keeps_status_event_chain_contiguous(self) -> None:
         current_user = User(
             id=str(uuid.uuid4()),
             email="postgres-reviewer@example.com",

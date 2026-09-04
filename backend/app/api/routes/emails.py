@@ -252,7 +252,7 @@ def update_status(
     if payload.status is EmailStatus.sent:
         _raise_conflict(
             "sent_requires_delivery",
-            "Only confirmed SMTP delivery can mark an email as sent",
+            "Only confirmed email delivery can mark an email as sent",
         )
     if payload.status is previous_status:
         db.rollback()
@@ -304,7 +304,7 @@ def send_email(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Idempotently queue the confirmed, approved payload for real SMTP."""
+    """Idempotently queue the confirmed, approved payload for real delivery."""
 
     settings = get_settings()
     if not settings.jwt_secret_key.strip():
@@ -323,7 +323,7 @@ def send_email(
             status_code=503,
             detail={
                 "code": configuration_error,
-                "message": "SMTP delivery is not configured",
+                "message": "Microsoft Graph delivery is not configured",
             },
         )
 
@@ -335,7 +335,7 @@ def send_email(
             expected_content_hash=payload.expected_content_hash,
             acknowledge_duplicate_risk=payload.acknowledge_duplicate_risk,
             requested_by=str(current_user.id),
-            sender_email=settings.smtp_email,
+            sender_email=str(settings.microsoft_sender_email),
         )
     except email_delivery_service.EmailNotFoundError:
         raise HTTPException(status_code=404, detail="Email not found") from None

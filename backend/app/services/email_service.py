@@ -1,14 +1,14 @@
-"""SMTP transport for password resets and approved outreach delivery."""
+"""Microsoft Graph transport for password resets and approved outreach delivery."""
 
 from __future__ import annotations
 
-import smtplib
-import socket
-import ssl
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
 from html import escape
+from urllib.parse import quote
+
+import httpx
 
 from app.config import Settings, get_settings
 from app.email_signature import (
@@ -19,7 +19,7 @@ from app.email_signature import (
 
 
 class EmailDeliveryFailure(RuntimeError):
-    """The SMTP relay definitively did not accept the message."""
+    """The mail provider definitively did not accept the message."""
 
     def __init__(self, code: str):
         super().__init__(code)
@@ -27,24 +27,60 @@ class EmailDeliveryFailure(RuntimeError):
 
 
 class EmailDeliveryUnknown(RuntimeError):
-    """SMTP may have accepted the message before the connection failed."""
+    """The mail provider may have accepted the message before failing."""
 
     def __init__(self, code: str):
         super().__init__(code)
         self.code = code
 
 
-def smtp_is_configured(settings: Settings | None = None) -> bool:
-    """Return whether the settings can authenticate to an SMTP relay."""
+def microsoft_graph_is_configured(settings: Settings | None = None) -> bool:
+    """Return whether the settings can authenticate to Microsoft Graph."""
 
     configured = settings or get_settings()
     return bool(
-        configured.smtp_host.strip()
-        and configured.smtp_port > 0
-        and configured.smtp_email.strip()
-        and configured.smtp_password.strip()
-        and configured.smtp_timeout_seconds > 0
+        configured.microsoft_client_id.strip()
+        and configured.microsoft_tenant_id.strip()
+        and configured.microsoft_client_secret.strip()
+        and configured.microsoft_sender_email.strip()
+        and configured.microsoft_graph_timeout_seconds > 0
     )
+
+
+def _message_id_domain(sender_email: str) -> str:
+    return sender_email.split("@")[-1]
+
+
+def _graph_token(settings: Settings) -> str:
+    token_url = (
+        "https://login.microsoftonline.com/"
+        f"{quote(settings.microsoft_tenant_id.strip(), safe='')}/oauth2/v2.0/token"
+    )
+    try:
+        response = httpx.post(
+            token_url,
+            data={
+                "client_id": settings.microsoft_client_id.strip(),
+                "client_secret": settings.microsoft_client_secret,
+                "grant_type": "client_credentials",
+                "scope": "https://graph.microsoft.com/.default",
+            },
+            timeout=settings.microsoft_graph_timeout_seconds,
+        )
+    except httpx.HTTPError as exc:
+        raise EmailDeliveryFailure("microsoft_graph_auth_request_failed") from exc
+
+    if response.status_code in (401, 403):
+        raise EmailDeliveryFailure("microsoft_graph_authentication_failed")
+    if not 200 <= response.status_code < 300:
+        raise EmailDeliveryFailure("microsoft_graph_auth_request_failed")
+    try:
+        access_token = response.json().get("access_token")
+    except ValueError as exc:
+        raise EmailDeliveryFailure("microsoft_graph_auth_response_invalid") from exc
+    if not isinstance(access_token, str) or not access_token.strip():
+        raise EmailDeliveryFailure("microsoft_graph_auth_response_invalid")
+    return access_token
 
 
 def send_outreach_email(
@@ -59,10 +95,10 @@ def send_outreach_email(
     """Deliver one outreach message with plain text and styled HTML."""
 
     configured = settings or get_settings()
-    if not smtp_is_configured(configured):
-        raise EmailDeliveryFailure("smtp_not_configured")
-    if sender_email.strip().casefold() != configured.smtp_email.strip().casefold():
-        raise EmailDeliveryFailure("smtp_sender_configuration_changed")
+    if not microsoft_graph_is_configured(configured):
+        raise EmailDeliveryFailure("microsoft_graph_not_configured")
+    if sender_email.strip().casefold() != configured.microsoft_sender_email.strip().casefold():
+        raise EmailDeliveryFailure("microsoft_sender_configuration_changed")
 
     message = EmailMessage()
     try:
@@ -153,91 +189,72 @@ def _deliver_message(
     recipient_email: str,
     settings: Settings,
 ) -> None:
-    """Perform the SMTP conversation with conservative ambiguity handling."""
+    """Submit one message through Microsoft Graph JSON sendMail."""
 
-    server: smtplib.SMTP | None = None
-    accepted = False
+    access_token = _graph_token(settings)
+    send_url = (
+        "https://graph.microsoft.com/v1.0/users/"
+        f"{quote(sender_email, safe='')}/sendMail"
+    )
+    html_body = message.get_body(preferencelist=("html",))
+    plain_body = message.get_body(preferencelist=("plain",))
+    body_part = html_body or plain_body
+    if body_part is None:
+        raise EmailDeliveryFailure("invalid_email_message")
+    content_type = "HTML" if html_body is not None else "Text"
+    message_id = str(message.get("Message-ID", "")).strip()
+    graph_message: dict[str, object] = {
+        "subject": str(message["Subject"]),
+        "body": {
+            "contentType": content_type,
+            "content": body_part.get_content(),
+        },
+        "toRecipients": [
+            {"emailAddress": {"address": recipient_email}},
+        ],
+    }
+    if message_id:
+        graph_message["internetMessageHeaders"] = [
+            {"name": "x-accoya-message-id", "value": message_id},
+        ]
+
     try:
-        try:
-            server = smtplib.SMTP(
-                settings.smtp_host,
-                settings.smtp_port,
-                timeout=settings.smtp_timeout_seconds,
-            )
-            server.ehlo()
-            server.starttls(context=ssl.create_default_context())
-            server.ehlo()
-            smtp_username = (
-                settings.smtp_username.strip()
-                if settings.smtp_username and settings.smtp_username.strip()
-                else settings.smtp_email.strip()
-            )
-            server.login(smtp_username, settings.smtp_password)
-        except smtplib.SMTPAuthenticationError as exc:
-            raise EmailDeliveryFailure("smtp_authentication_failed") from exc
-        except (
-            smtplib.SMTPConnectError,
-            smtplib.SMTPHeloError,
-            smtplib.SMTPNotSupportedError,
-        ) as exc:
-            raise EmailDeliveryFailure("smtp_connection_rejected") from exc
-        except (socket.timeout, TimeoutError, OSError) as exc:
-            raise EmailDeliveryFailure("smtp_connection_failed") from exc
-        except smtplib.SMTPException as exc:
-            raise EmailDeliveryFailure("smtp_setup_failed") from exc
+        response = httpx.post(
+            send_url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json={"message": graph_message, "saveToSentItems": True},
+            timeout=settings.microsoft_graph_timeout_seconds,
+        )
+    except httpx.HTTPError as exc:
+        raise EmailDeliveryUnknown("microsoft_graph_submission_interrupted") from exc
 
-        try:
-            refused = server.send_message(
-                message,
-                from_addr=sender_email,
-                to_addrs=[recipient_email],
-            )
-            if refused:
-                raise EmailDeliveryFailure("smtp_recipient_refused")
-            accepted = True
-        except EmailDeliveryFailure:
-            raise
-        except (
-            smtplib.SMTPRecipientsRefused,
-            smtplib.SMTPSenderRefused,
-            smtplib.SMTPDataError,
-        ) as exc:
-            raise EmailDeliveryFailure("smtp_message_rejected") from exc
-        except (smtplib.SMTPServerDisconnected, socket.timeout, TimeoutError, OSError) as exc:
-            raise EmailDeliveryUnknown("smtp_submission_interrupted") from exc
-        except smtplib.SMTPResponseException as exc:
-            raise EmailDeliveryFailure("smtp_message_rejected") from exc
-        except smtplib.SMTPException as exc:
-            raise EmailDeliveryUnknown("smtp_submission_uncertain") from exc
-
-        # Once DATA was accepted, a QUIT failure must not turn success into an
-        # automatic retry candidate.
-        try:
-            server.quit()
-        except Exception:
-            pass
-    finally:
-        if server is not None and not accepted:
-            try:
-                server.close()
-            except Exception:
-                pass
+    if response.status_code == 202:
+        return
+    if response.status_code in (408, 429) or response.status_code >= 500:
+        raise EmailDeliveryUnknown("microsoft_graph_submission_uncertain")
+    if response.status_code in (401, 403):
+        raise EmailDeliveryFailure("microsoft_graph_authentication_failed")
+    raise EmailDeliveryFailure("microsoft_graph_message_rejected")
 
 
 def send_password_reset_email(recipient_email: str, reset_link: str) -> bool:
     """Send a password-reset email while preserving the legacy bool contract."""
 
     settings = get_settings()
-    if not smtp_is_configured(settings):
+    if not microsoft_graph_is_configured(settings):
         return False
+    sender_email = settings.microsoft_sender_email.strip()
 
     message = EmailMessage()
     try:
-        message["From"] = settings.smtp_email.strip()
+        message["From"] = sender_email
         message["To"] = recipient_email.strip()
         message["Subject"] = "Reset Your Password - Accoya"
         message["Date"] = format_datetime(datetime.now(timezone.utc))
-        message["Message-ID"] = make_msgid(domain=settings.smtp_email.split("@")[-1])
+        message["Message-ID"] = make_msgid(domain=_message_id_domain(sender_email))
         message.set_content(
             "We received a request to reset your Accoya password. Use this "
             f"link within {settings.password_reset_token_expire_minutes} minutes:\n"
@@ -270,7 +287,7 @@ def send_password_reset_email(recipient_email: str, reset_link: str) -> bool:
         )
         _deliver_message(
             message,
-            sender_email=settings.smtp_email.strip(),
+            sender_email=sender_email,
             recipient_email=recipient_email.strip(),
             settings=settings,
         )
@@ -290,17 +307,18 @@ def send_access_request_review_email(
     """Notify the approver about a pending sign-in request."""
 
     settings = get_settings()
-    if not smtp_is_configured(settings):
+    if not microsoft_graph_is_configured(settings):
         return False
+    sender_email = settings.microsoft_sender_email.strip()
 
     display_name = requester_name.strip() if requester_name else "Not provided"
     message = EmailMessage()
     try:
-        message["From"] = settings.smtp_email.strip()
+        message["From"] = sender_email
         message["To"] = approver_email.strip()
         message["Subject"] = "Accoya Access Request Pending Approval"
         message["Date"] = format_datetime(datetime.now(timezone.utc))
-        message["Message-ID"] = make_msgid(domain=settings.smtp_email.split("@")[-1])
+        message["Message-ID"] = make_msgid(domain=_message_id_domain(sender_email))
         message.set_content(
             "A user requested access to Accoya Outreach.\n\n"
             f"Email: {requester_email}\n"
@@ -331,7 +349,7 @@ def send_access_request_review_email(
         )
         _deliver_message(
             message,
-            sender_email=settings.smtp_email.strip(),
+            sender_email=sender_email,
             recipient_email=approver_email.strip(),
             settings=settings,
         )
@@ -349,15 +367,16 @@ def send_access_request_decision_email(
     """Notify the requester that access was approved or rejected."""
 
     settings = get_settings()
-    if not smtp_is_configured(settings):
+    if not microsoft_graph_is_configured(settings):
         return False
+    sender_email = settings.microsoft_sender_email.strip()
 
     message = EmailMessage()
     try:
-        message["From"] = settings.smtp_email.strip()
+        message["From"] = sender_email
         message["To"] = recipient_email.strip()
         message["Date"] = format_datetime(datetime.now(timezone.utc))
-        message["Message-ID"] = make_msgid(domain=settings.smtp_email.split("@")[-1])
+        message["Message-ID"] = make_msgid(domain=_message_id_domain(sender_email))
 
         if approved:
             message["Subject"] = "Accoya Access Request Approved"
@@ -399,7 +418,7 @@ def send_access_request_decision_email(
         message.add_alternative(html_body, subtype="html")
         _deliver_message(
             message,
-            sender_email=settings.smtp_email.strip(),
+            sender_email=sender_email,
             recipient_email=recipient_email.strip(),
             settings=settings,
         )

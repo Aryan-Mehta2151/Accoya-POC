@@ -3,7 +3,7 @@
 A proof of concept that ingests EarlyBid construction opportunities manually
 or on a durable daily schedule, queues personalized Accoya nurturing emails for
 background generation, supports human review on each opportunity, manages
-strategy documents, durably delivers approved outreach through SMTP, and
+strategy documents, durably delivers approved outreach through Microsoft Graph, and
 provides a knowledge-base chatbot. Every business API route requires an active,
 administrator-provisioned user session. The browser carries an eight-hour JWT
 in an HttpOnly cookie and sends a separate CSRF token on mutating requests.
@@ -47,7 +47,7 @@ manual sync -------------------------------`
                                                                                  |
                                                                                  `-> delivery job
                                                                                         |
-                                                                                        `-> separate SMTP worker
+                                                                                        `-> separate delivery worker
 ```
 
 The worker's successful agent path performs these stages in order:
@@ -137,7 +137,7 @@ ACCESS_REQUEST_COOLDOWN_MINUTES=15
 
 Application startup rejects blank or weak authentication secrets. Secure
 cookies are mandatory outside development. Password resets and access-request
-review and decision messages use the SMTP settings described below. Google
+review and decision messages use the Microsoft Graph settings described below. Google
 sign-in additionally requires Google OAuth credentials and the configured
 callback URI. Open local frontend and API URLs through the same hostname: use
 `localhost` for both or `127.0.0.1` for both. Approval and rejection links use
@@ -180,7 +180,7 @@ login. There is no public signup endpoint or browser administration API.
 Google OAuth is optional in development. To run with email/password login
 only, leave `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` blank. Create the
 account with the password-based `admin create` command above. Password reset
-email is also optional for local login; when SMTP is not configured, an
+email is also optional for local login; when Microsoft Graph is not configured, an
 administrator can assign a new password from `backend/`:
 
 ```powershell
@@ -263,11 +263,10 @@ leases remain terminal until a user explicitly retries.
 
 ### 4. Start the email-delivery worker
 
-Configure `JWT_SECRET_KEY`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`,
-`SMTP_EMAIL`, and `SMTP_PASSWORD` in `backend/.env`. The example uses SMTP2GO
-at `mail.smtp2go.com:2525` with STARTTLS: `SMTP_USERNAME` is the relay login,
-while `SMTP_EMAIL` is the verified sender address. Then, in another backend
-terminal, start one delivery worker:
+Configure `JWT_SECRET_KEY`, `MICROSOFT_CLIENT_ID`, `MICROSOFT_TENANT_ID`, and
+`MICROSOFT_CLIENT_SECRET` in `backend/.env`. `MICROSOFT_SENDER_EMAIL` defaults
+to `accoya@ampedstrategy.com`; override it only if the authorized sender
+mailbox changes. Then, in another backend terminal, start one delivery worker:
 
 ```powershell
 cd backend
@@ -276,14 +275,14 @@ python -m app.workers.email_delivery
 ```
 
 The authenticated Send Email action only queues durable work. This separately
-supervised worker is the process that can contact SMTP and send real external
+supervised worker is the process that can contact Microsoft Graph and send real external
 email. Starting it is therefore explicit authorization to deliver any queued,
 approved outreach using the configured account. Do not start it as a health
-check or automated test. The same SMTP transport also sends password resets,
+check or automated test. The same Graph transport also sends password resets,
 access-review notifications, and access approval or rejection decisions.
 
 The worker records relay acceptance as `succeeded` and then marks the review
-email `sent`. Relay acceptance means the SMTP server accepted responsibility
+email `sent`. Acceptance means Microsoft Graph accepted responsibility
 for the message; it does not guarantee inbox placement. Definite failures leave
 the email approved for an explicit retry. Ambiguous timeouts, disconnects, and
 expired leases become `delivery_unknown` and are never retried automatically
@@ -373,10 +372,10 @@ directory.
 | Authentication | `JWT_SECRET_KEY`, `CSRF_SECRET_KEY`, `JWT_ISSUER`, `JWT_AUDIENCE`, `AUTH_COOKIE_SECURE`, `FRONTEND_URL` | JWT and CSRF secrets must each contain at least 32 bytes. Sessions last eight hours. Production requires HTTPS, secure cookies, and one frontend/API hostname so SameSite=Lax cookies work. All business routes require an active provisioned user. |
 | Access requests | `ACCESS_REQUEST_APPROVER_EMAIL`, `ACCESS_REQUEST_TOKEN_EXPIRE_MINUTES`, `ACCESS_REQUEST_COOLDOWN_MINUTES` | Sends single-use approval/rejection links to the configured approver and decision mail to the requester. The example values expire review links after 1,440 minutes and throttle repeat requests for 15 minutes. |
 | Google OAuth | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` | Password alternative for active approved users. Production requires both credentials and the exact `${API_PREFIX}/auth/callback/google` URL. The backend uses state and PKCE and never places a JWT in a redirect URL. |
-| SMTP | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_EMAIL`, `SMTP_PASSWORD`, `SMTP_TIMEOUT_SECONDS`, `PASSWORD_RESET_TOKEN_EXPIRE_MINUTES` | Shared STARTTLS transport for outreach, password recovery, access review, and access decisions. The example targets SMTP2GO on port 2525; its relay username may differ from the verified sender address. The request timeout defaults to 30 seconds, and reset tokens default to 15 minutes. |
+| Microsoft Graph mail | `MICROSOFT_CLIENT_ID`, `MICROSOFT_TENANT_ID`, `MICROSOFT_CLIENT_SECRET`, `MICROSOFT_SENDER_EMAIL`, `MICROSOFT_GRAPH_TIMEOUT_SECONDS`, `PASSWORD_RESET_TOKEN_EXPIRE_MINUTES` | Shared Graph `Mail.Send` transport for outreach, password recovery, access review, and access decisions. The sender defaults to `accoya@ampedstrategy.com`; the request timeout defaults to 30 seconds, and reset tokens default to 15 minutes. |
 | Frontend | `VITE_API_BASE_URL` | Optional full browser API base; include `/api` unless `API_PREFIX` changes. Development defaults to port 8000 on the page hostname; production defaults to same-origin `/api`. |
 
-Settings, including SMTP and access-request configuration, and the configured
+Settings, including Graph mail and access-request configuration, and the configured
 email agent are process-cached. Restart FastAPI and all three workers after
 changing environment values.
 
@@ -399,7 +398,7 @@ schema. It imports no old records and intentionally has no backfill path:
   no run and contacts no provider; the separately started sync worker creates
   only the configured feed's current-day slot.
 - `0006_email_delivery_queue` adds durable outbound delivery jobs. Applying it
-  sends no mail; only the separately started delivery worker contacts SMTP.
+  sends no mail; only the separately started delivery worker contacts Microsoft Graph.
 - `0007_web_auth_security` normalizes account identities, disables legacy
   accounts until an administrator enables them, adds session revocation state,
   and invalidates legacy password-reset tokens. It does not create users.
@@ -517,8 +516,8 @@ by the separate worker, after ingestion has committed and returned.
 
 When EarlyBid deletes a lead, queued generation and delivery jobs fail safely
 with `lead_inactive`. A generation result already in progress is discarded at
-finalization if the lead became inactive. An SMTP job already running records
-its actual outcome because it may already have reached the relay.
+finalization if the lead became inactive. A delivery job already running records
+its actual outcome because it may already have reached Microsoft Graph.
 
 The sync response includes `generation_queued`. CSV upload now returns
 `{items, created, updated, total, generation_queued}` rather than a bare lead
@@ -561,7 +560,7 @@ ID. ORM internals and arbitrary raw feed fields are never added to the prompt.
 | POST | `/api/auth/logout` | Revoke the account's sessions and clear authentication cookies |
 | GET | `/api/auth/google/start` | Begin the state- and PKCE-protected Google flow |
 | GET | `/api/auth/callback/google` | Validate Google and establish the cookie session |
-| POST | `/api/auth/forgot-password` | Create a reset token and attempt an SMTP reset email |
+| POST | `/api/auth/forgot-password` | Create a reset token and attempt a Microsoft Graph reset email |
 | POST | `/api/auth/reset-password` | Consume a reset token and replace the password |
 | GET | `/api/auth/me` | Read the cookie-authenticated user |
 | POST | `/api/leads/sync` | Fetch and upsert the configured EarlyBid feed |
@@ -579,7 +578,7 @@ ID. ORM internals and arbitrary raw feed fields are never added to the prompt.
 | GET | `/api/emails/{email_id}` | Read one email for deep-link compatibility |
 | PATCH | `/api/emails/{email_id}` | Edit the mutable recipient, subject, body, or signature |
 | POST | `/api/emails/{email_id}/status` | Update review status and append an audit event; approval requires the previewed content hash and clients cannot set `sent` |
-| POST | `/api/emails/{email_id}/send` | Authenticated, idempotent queueing of real SMTP delivery |
+| POST | `/api/emails/{email_id}/send` | Authenticated, idempotent queueing of real Microsoft Graph delivery |
 | POST | `/api/documents/upload` | Upload a strategy document to S3 and save metadata |
 | GET | `/api/documents` | List strategy documents from S3 |
 | DELETE | `/api/documents/{doc_id}` | Delete an S3 document and best-effort metadata record |
@@ -627,11 +626,12 @@ changing the lead, and a later feed update never silently retargets an existing
 draft.
 
 New email drafts whose normalized opportunity state is one of the 50 US state
-codes or `DC` receive the fixed Doug Gillikin/Accsys plain-text signature.
-Other drafts start without a signature, but reviewers can add that default or
-write another signature for the individual email. Existing emails are not
-backfilled. The generator omits sign-offs so the signature remains a separate
-reviewable field.
+codes or `DC` receive Arturo Lugo's fixed US signature. Netherlands opportunities
+receive Laura Keily's fixed NL signature. Other drafts start without a signature,
+but reviewers can add a supported default or write another signature for the
+individual email. Existing emails are rendered with the current default when no
+signature was stored. The generator omits sign-offs so the signature remains a
+separate reviewable field.
 
 All attempts, including failures, retain durable job/run records; only
 successful generation creates an email. The production endpoints never return
@@ -653,7 +653,7 @@ and CSRF header. It accepts a caller-generated UUID idempotency key, the
 current delivery-content SHA-256 hash, and an optional duplicate-risk
 acknowledgement. It returns HTTP 202 with the existing or newly queued delivery
 summary. The current approved email, its saved recipient/subject/body/signature, and the
-expected hash must still match; FastAPI never contacts SMTP in this request.
+expected hash must still match; FastAPI never contacts Microsoft Graph in this request.
 
 Each `email_delivery_jobs` row snapshots the sender, recipient, subject, and
 fully rendered plain-text body plus signature that the user confirmed.
@@ -661,9 +661,9 @@ PostgreSQL locking and a partial unique index
 allow at most one queued/running delivery for an email. Same-key replay for the
 same email returns the original job; reusing that key for another email is a
 conflict. The worker claims with `SKIP LOCKED`, commits and releases locks, and
-then calls SMTP with a stable RFC Message-ID while heartbeating its lease.
+then calls Microsoft Graph with a stable RFC Message-ID while heartbeating its lease.
 
-SMTP relay acceptance atomically completes the job, marks the review email
+Microsoft Graph acceptance atomically completes the job, marks the review email
 `sent`, and appends the status event. A definite failure records a safe error
 and leaves the email approved for a manual retry. A timeout, disconnect during
 submission, expired lease, or another ambiguous outcome becomes
@@ -694,7 +694,7 @@ APIs.
 - Feed sync and CSV upload only persist leads and jobs; they never instantiate
   or invoke the email agent. Only the worker performs billable generation.
 - The delivery API only persists a job. Only the separately started delivery
-  worker contacts SMTP, and it logs safe identifiers/outcomes rather than the
+  worker contacts Microsoft Graph, and it logs safe identifiers/outcomes rather than the
   recipient, subject, body, credentials, or raw relay response.
 - The daily sync worker is the only automatic EarlyBid caller. It logs run/feed
   identifiers, attempts, safe error codes, timings, and aggregate counts, never
@@ -731,7 +731,7 @@ npm run build
 
 The offline suites cover new-only automatic queueing, replay-safe generation
 and delivery queueing, editable/default recipient and signature behavior,
-approval-preview and content-hash rules, definite/unknown fake SMTP outcomes, workspace ordering
+approval-preview and content-hash rules, definite/unknown fake Graph outcomes, workspace ordering
 and staleness, provider-free worker outcomes, and the rule that API handlers
 never perform provider delivery. Existing ingestion coverage includes
 explicit-ID precedence, deterministic `earlybid-natural-v1` IDs, repeat
@@ -812,7 +812,7 @@ Use this cutover order:
    and plaintext legacy reset secrets.
 2. Set `APP_ENV=production`. Configure independent 32-byte-or-longer JWT/CSRF secrets, exact HTTPS
    frontend/API callback origins on one hostname, `AUTH_COOKIE_SECURE=true`, and
-   Google OAuth and recovery SMTP credentials. Route `/api` to FastAPI on that
+  Google OAuth and Microsoft Graph mail credentials. Route `/api` to FastAPI on that
    hostname; the SameSite=Lax cookies intentionally do not support a cross-site
    SPA/API split. Only exact `APP_ENV=development` permits HTTP cookies.
 3. Apply `python -m app.db.bootstrap`, then deploy the matching API, frontend,
@@ -860,7 +860,7 @@ database for investigation, restore the pre-cutover backup, immediately run
 the prior API only on a private network or behind an independently verified auth
 gateway while preparing a roll-forward. Before any worker restarts, reconcile
 every provider, sync, and delivery outcome created after the backup; otherwise
-restored queue rows can repeat calls or SMTP delivery.
+restored queue rows can repeat calls or Microsoft Graph delivery.
 
 ## Known gaps and safety
 
@@ -877,7 +877,7 @@ restored queue rows can repeat calls or SMTP delivery.
   mutating external services.
 - Review status changes alone never send mail; the authenticated Send Email
   action queues a real external message. Starting the delivery worker
-  authorizes live SMTP sends. `sent` means relay acceptance, not inbox delivery,
+  authorizes live Microsoft Graph sends. `sent` means Graph accepted the message, not inbox delivery,
   and sent emails are not indexed into the knowledge base.
 - Document upload does not start a Bedrock KB ingestion job.
 - There is no bundled process supervisor, CI workflow, or AWS deployment
@@ -885,7 +885,7 @@ restored queue rows can repeat calls or SMTP delivery.
   as separate processes.
 - Deploy the database migration, API, generation worker, delivery worker, and
   sync worker together. Starting the delivery worker authorizes queued live
-  SMTP sends; starting the sync worker authorizes live daily EarlyBid calls
+  Graph sends; starting the sync worker authorizes live daily EarlyBid calls
   and downstream draft queueing. Do not use either as a health check or
   automated test.
 - EarlyBid does not supply an immutable opportunity ID. A project rename or

@@ -58,11 +58,11 @@ class EmailDeliveryApiTests(unittest.TestCase):
         )
         self.settings = Settings(
             jwt_secret_key="offline-jwt-secret",
-            smtp_host="smtp.example.com",
-            smtp_port=587,
-            smtp_email="sender@example.com",
-            smtp_password="offline-smtp-secret",
-            smtp_timeout_seconds=10,
+            microsoft_client_id="client-id",
+            microsoft_tenant_id="tenant-id",
+            microsoft_client_secret="offline-secret",
+            microsoft_sender_email="sender@example.com",
+            microsoft_graph_timeout_seconds=10,
         )
 
     def tearDown(self) -> None:
@@ -492,9 +492,9 @@ class EmailDeliveryApiTests(unittest.TestCase):
 
         unconfigured = Settings(
             jwt_secret_key="offline-jwt-secret",
-            smtp_host="",
-            smtp_email="",
-            smtp_password="",
+            microsoft_client_id="",
+            microsoft_tenant_id="",
+            microsoft_client_secret="",
         )
         with patch.object(emails, "get_settings", return_value=unconfigured):
             response = self.client.post(
