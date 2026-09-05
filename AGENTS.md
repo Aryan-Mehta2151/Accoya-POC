@@ -20,10 +20,12 @@ manually and through a durable daily-midnight scheduler, stores them as leads,
 uploads marketing strategy documents to S3, retrieves
 strategy and nurturing context through an AWS Bedrock Knowledge Base, generates
 outreach emails through a LangGraph/Gemini agent, supports a human-review status
-workflow and durable Microsoft Graph delivery, and exposes a knowledge-base chatbot. New
-leads durably queue their first email for a separate generation worker, while
-approved messages queue delivery for a separate Graph delivery worker. A React SPA provides Overview,
-Opportunities with inline outreach review, Strategy Docs, and Chatbot tabs.
+workflow, durable Microsoft Graph delivery, and metadata-only reply tracking,
+and exposes a knowledge-base chatbot. New leads durably queue their first email
+for a separate generation worker, while approved messages queue delivery for a
+separate Graph delivery worker. A fourth worker reconciles Outlook replies with
+opportunities. A React SPA provides Overview, Opportunities with inline outreach
+review and reply filters, Strategy Docs, and Chatbot tabs.
 
 The backend stack is FastAPI, Pydantic 2, synchronous SQLAlchemy 2, PostgreSQL,
 boto3, LangGraph, LangChain/Gemini, and httpx. The frontend is React 19,
@@ -49,6 +51,9 @@ TypeScript 6, Vite 8, native `fetch`, and global CSS.
   queue worker; the FastAPI process never performs queued provider work.
 - `backend/app/workers/email_delivery.py`: separately started PostgreSQL queue
   worker that is solely responsible for live outreach Microsoft Graph calls.
+- `backend/app/workers/email_reply_sync.py`: separately started PostgreSQL
+  worker for Graph subscriptions, sent-message correlation, mailbox delta
+  reconciliation, and the metadata-only reply projection.
 - `backend/app/workers/earlybid_sync.py`: separately started PostgreSQL
   scheduler/worker for current-day local-midnight EarlyBid synchronization.
 - `backend/agent/`: standalone synchronous Accoya email agent, including
@@ -92,6 +97,8 @@ python -m app.workers.email_generation
 # In a third backend terminal with the same environment:
 python -m app.workers.email_delivery
 # In a fourth backend terminal with the same environment:
+python -m app.workers.email_reply_sync
+# In a fifth backend terminal with the same environment:
 python -m app.workers.earlybid_sync
 ```
 
@@ -146,6 +153,7 @@ any other tracked file.
 | Generation worker | `EMAIL_GENERATION_WORKER_POLL_SECONDS`, `EMAIL_GENERATION_HEARTBEAT_SECONDS`, `EMAIL_GENERATION_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. Keep the stale threshold safely above the heartbeat interval. |
 | Delivery worker | `EMAIL_DELIVERY_WORKER_POLL_SECONDS`, `EMAIL_DELIVERY_HEARTBEAT_SECONDS`, `EMAIL_DELIVERY_STALE_SECONDS` | Defaults to 2, 15, and 300 seconds. Keep stale safely above heartbeat. |
 | Microsoft Graph mail | `MICROSOFT_CLIENT_ID`, `MICROSOFT_TENANT_ID`, `MICROSOFT_CLIENT_SECRET`, `MICROSOFT_SENDER_EMAIL`, `MICROSOFT_GRAPH_TIMEOUT_SECONDS` | Required by the delivery worker; timeout defaults to 30 seconds. The sender defaults to `accoya@ampedstrategy.com`. The worker submits MIME messages through Graph `Mail.Send` and preserves stable Message-IDs; a timeout may produce an unknown outcome. |
+| Graph reply tracking | `EMAIL_REPLY_TRACKING_ENABLED`, `MICROSOFT_GRAPH_NOTIFICATION_URL`, `MICROSOFT_GRAPH_CLIENT_STATE`, `EMAIL_REPLY_WORKER_POLL_SECONDS`, `EMAIL_REPLY_RECONCILE_SECONDS`, `EMAIL_REPLY_HEARTBEAT_SECONDS`, `EMAIL_REPLY_STALE_SECONDS`, `EMAIL_REPLY_BACKFILL_DAYS` | Disabled by default. When enabled, requires mailbox-scoped `Application Mail.Read`, an HTTPS notification URL, a client-state secret of at least 32 bytes, and the reply worker. Entra application grants and Exchange Application RBAC assignments are additive; remove equivalent tenant-wide Entra grants or constrain them with an Application Access Policy. It stores metadata only, uses a 90-day initial backfill, and reconciles folder-specific delta state every 60 seconds by default. |
 | Authentication | `JWT_SECRET_KEY`, `CSRF_SECRET_KEY`, `JWT_ISSUER`, `JWT_AUDIENCE`, `AUTH_COOKIE_SECURE`, `FRONTEND_URL` | Every business route requires an active user and the eight-hour JWT HttpOnly cookie; unsafe methods also require the cookie-bound CSRF header. Production startup requires explicit `APP_ENV=production`, strong secrets, canonical HTTPS URLs/CORS, secure cookies, and one frontend/API hostname for SameSite=Lax. |
 | Google OAuth | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` | Required outside development. State and PKCE protect the flow; Google never auto-provisions a user. |
 | EarlyBid | `LEAD_API_BASE_URL`, `LEAD_API_KEY`, `LEAD_FEED_RESELLER`, `LEAD_FEED_CLIENT` | Sync uses Bearer auth; reseller/client also scope derived natural identities. |
@@ -153,7 +161,7 @@ any other tracked file.
 | Frontend | `VITE_API_BASE_URL` | Optional; include `/api` unless `API_PREFIX` was changed. |
 
 `get_settings()` is cached, and multiple modules retain the returned object at
-module scope. Restart the backend and all three workers after changing
+module scope. Restart the backend and all four workers after changing
 environment values.
 
 ## Implemented request and data flows
@@ -212,6 +220,18 @@ environment values.
   leave the email approved. Timeouts, submission disconnects, and stale leases
   become `delivery_unknown` and are never automatically retried; a user must
   explicitly acknowledge duplicate risk before resending.
+- Reply tracking: the public Graph callback validates the subscription,
+  tenant, and constant-time client state, then only coalesces durable message
+  signals. `python -m app.workers.email_reply_sync` owns every mailbox read. It
+  reconciles Sent Items through the existing `x-accoya-message-id`, persists
+  folder-specific delta links, maintains six-day subscriptions, and performs a
+  bounded 90-day rescan after missed events or invalid cursors. Exact reply
+  headers take precedence over an unambiguous conversation match; ambiguous,
+  unmatched, automated, bounce, and self-sent messages remain in the audit
+  projection but are not counted. Outlook remains authoritative for read state.
+  `GET /api/email-replies/summary` reports active-opportunity counts and safe
+  synchronization health, while lead-list rows include unread counts and the
+  latest reply timestamp for active and dismissed opportunities.
 - Agent runs: a worker claim creates and commits a `running` record before
   provider work, then finalizes it as `generated`, `insufficient_context`,
   `provider_error`, or `system_error`. `GET
@@ -262,6 +282,12 @@ environment values.
   per email, stable Message-IDs, exact confirmed-content snapshots, and no
   automatic replay of `delivery_unknown`. Only the delivery worker may set an
   email to `sent` after relay acceptance.
+- Keep reply synchronization in its separate worker. Graph subscriptions,
+  notification signals, folder-specific delta checkpoints, leases, stale
+  recovery, and reply upserts must remain durable and idempotent. Do not fetch
+  mailbox data in FastAPI handlers, and never hold a transaction across a Graph
+  request. Preserve immutable IDs, exact-header-first matching, ambiguity
+  rejection, metadata-only storage, and Outlook-owned read/unread state.
 - Keep daily scheduling in the separate worker, based on local calendar dates
   and timezone-aware midnight conversion. Preserve current-day-only catch-up,
   the unique feed/date identity, bounded retry classification, and atomic
@@ -272,9 +298,11 @@ environment values.
 - Use FastAPI dependencies for database sessions and response models for typed
   endpoints. Existing database and external clients are synchronous.
 - Keep every business router behind the shared cookie-auth dependency and CSRF
-  dependency for unsafe methods. Preserve the real-send content-hash validation
-  under the email row lock. Do not confuse shared authentication with tenant or
-  object-level authorization.
+  dependency for unsafe methods. The single intentional exception is the public
+  Microsoft Graph notification callback, which must validate Graph's token or
+  configured client state and perform no mailbox reads. Preserve the real-send
+  content-hash validation under the email row lock. Do not confuse shared
+  authentication with tenant or object-level authorization.
 - Translate expected integration failures into useful HTTP errors without
   exposing credentials. The existing convention generally uses 502 for an
   upstream failure and 404 for a missing local record.
@@ -328,6 +356,7 @@ python -m compileall -q app agent alembic
 python -m unittest discover -s agent/tests -t . -p "test_*.py"
 python -m unittest tests.test_email_generation_queue -v
 python -m unittest tests.test_email_delivery_queue -v
+python -m unittest tests.test_email_reply_tracking -v
 python -m unittest tests.test_earlybid_sync_scheduler -v
 python -m unittest discover -s tests -v
 
@@ -343,7 +372,7 @@ whose name ends in `_test`:
 ```powershell
 # backend/; never point this at accoya_agent or another non-test database.
 $env:ACCOYA_TEST_DATABASE_URL="postgresql+psycopg2://postgres:YOUR_PASSWORD@localhost:5433/accoya_agent_test"
-python -m unittest tests.test_postgres_auth_migration tests.test_postgres_agent_database tests.test_postgres_email_delivery -v
+python -m unittest tests.test_postgres_auth_migration tests.test_postgres_agent_database tests.test_postgres_email_delivery tests.test_postgres_email_reply_tracking -v
 Remove-Item Env:ACCOYA_TEST_DATABASE_URL
 ```
 
@@ -373,6 +402,14 @@ idempotency and concurrent enqueueing, relay acceptance, definite failure,
 unknown outcomes, stable Message-IDs, stale leases, and the absence of
 automatic resend. Never start the live delivery worker or contact Microsoft Graph in an
 automated check.
+
+Reply-tracking coverage must fake Microsoft Graph and include validation-token
+handling, tenant/subscription/client-state rejection, lifecycle events,
+notification coalescing, subscriptions and renewal, throttling and pagination,
+invalid delta recovery, stale leases, and concurrent claims. Matching coverage
+must include exact headers, unambiguous conversations, ambiguity, pre-correlation
+replies, automated/bounce/self exclusions, moves, deletion, and read transitions.
+Never start the live reply worker or read a real mailbox in automated checks.
 
 Scheduler coverage must use fixed clocks and fake EarlyBid responses. Cover
 timezone/DST midnight conversion, current-day-only catch-up, unique schedules,
@@ -408,10 +445,12 @@ automated verification.
   a duplicate.
 - AWS deployment and process supervision remain out of scope. Alembic is
   configured with a clean baseline; legacy import/backfill is out of scope.
-- Deploy the database migration, web API, and all three separately supervised
+- Deploy the database migration, web API, and all four separately supervised
   workers together. Starting the delivery worker authorizes queued live Graph
-  sends. Starting the sync worker authorizes recurring live EarlyBid calls; do
-  not infer authorization to replay prior dates or backfill leads.
+  sends. Starting the reply worker authorizes live Graph mailbox reads and its
+  initial metadata backfill. Starting the sync worker authorizes recurring live
+  EarlyBid calls; do not infer authorization to replay prior dates or backfill
+  leads.
 - EarlyBid supplies no immutable opportunity ID. Project renames or location
   corrections produce new natural identities; automatic reconciliation is out
   of scope.

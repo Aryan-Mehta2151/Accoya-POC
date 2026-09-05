@@ -144,6 +144,61 @@ def validate_web_auth_settings(settings: Settings) -> None:
             "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be configured together"
         )
 
+    if settings.email_reply_tracking_enabled:
+        if not all(
+            (
+                settings.microsoft_client_id.strip(),
+                settings.microsoft_tenant_id.strip(),
+                settings.microsoft_client_secret.strip(),
+                str(settings.microsoft_sender_email).strip(),
+            )
+        ):
+            errors.append(
+                "Microsoft Graph credentials and sender must be configured "
+                "when reply tracking is enabled"
+            )
+        notification_url = urlparse(settings.microsoft_graph_notification_url)
+        expected_notification_path = (
+            f"{prefix}/microsoft-graph/mail-notifications"
+        )
+        if (
+            notification_url.scheme != "https"
+            or not notification_url.netloc
+            or notification_url.hostname is None
+            or notification_url.username is not None
+            or notification_url.password is not None
+            or notification_url.path != expected_notification_path
+            or notification_url.params
+            or notification_url.query
+            or notification_url.fragment
+        ):
+            errors.append(
+                "MICROSOFT_GRAPH_NOTIFICATION_URL must be a public HTTPS URL "
+                f"ending in {expected_notification_path!r}"
+            )
+        if len(settings.microsoft_graph_client_state.encode("utf-8")) < 32:
+            errors.append(
+                "MICROSOFT_GRAPH_CLIENT_STATE must be at least 32 bytes"
+            )
+        reply_timings = (
+            settings.email_reply_worker_poll_seconds,
+            settings.email_reply_reconcile_seconds,
+            settings.email_reply_heartbeat_seconds,
+            settings.email_reply_stale_seconds,
+        )
+        if min(reply_timings) <= 0:
+            errors.append("Email reply worker timing settings must be positive")
+        if (
+            settings.email_reply_stale_seconds
+            <= settings.email_reply_heartbeat_seconds
+        ):
+            errors.append(
+                "EMAIL_REPLY_STALE_SECONDS must exceed "
+                "EMAIL_REPLY_HEARTBEAT_SECONDS"
+            )
+        if settings.email_reply_backfill_days <= 0:
+            errors.append("EMAIL_REPLY_BACKFILL_DAYS must be positive")
+
     if hardened_environment:
         if not settings.auth_cookie_secure:
             errors.append("AUTH_COOKIE_SECURE must be true outside development")

@@ -288,7 +288,34 @@ the email approved for an explicit retry. Ambiguous timeouts, disconnects, and
 expired leases become `delivery_unknown` and are never retried automatically
 because the first message may already have been accepted.
 
-### 5. Start the daily EarlyBid sync worker
+### 5. Start the Microsoft Graph reply worker (optional)
+
+Reply tracking is disabled by default. Before enabling it, grant the existing
+service principal scoped `Application Mail.Read` and `Application Mail.Send`
+roles through Exchange Online Application RBAC for `MICROSOFT_SENDER_EMAIL`.
+Remove equivalent organization-wide Microsoft Entra `Mail.Read` and `Mail.Send`
+application grants: Entra grants and Exchange RBAC assignments are additive, so
+leaving either Entra grant in place bypasses the mailbox scope. If the existing
+Entra grants must remain, constrain them with an Exchange Application Access
+Policy instead of relying on Application RBAC to narrow them.
+Expose the FastAPI callback at the exact public HTTPS URL configured in
+`MICROSOFT_GRAPH_NOTIFICATION_URL`, set an independent random
+`MICROSOFT_GRAPH_CLIENT_STATE` of at least 32 bytes, apply migrations, and set
+`EMAIL_REPLY_TRACKING_ENABLED=true`.
+
+```powershell
+cd backend
+.\.venv\Scripts\Activate.ps1
+python -m app.workers.email_reply_sync
+```
+
+This separately supervised worker creates and renews the Graph subscription,
+performs the initial 90-day metadata-only backfill, and reconciles Inbox and
+Sent Items deltas. Starting it explicitly authorizes mailbox reads. It never
+stores reply subjects, bodies, previews, or attachments, and automated replies
+and delivery reports are excluded from dashboard counts.
+
+### 6. Start the daily EarlyBid sync worker
 
 In another backend terminal, start one scheduler worker:
 
@@ -315,7 +342,7 @@ to start with missing configuration. Authentication errors, other HTTP 4xx
 responses, invalid feeds, and a configuration failure discovered after startup
 terminate the current run without retrying it.
 
-### 6. Start the React frontend
+### 7. Start the React frontend
 
 In another terminal:
 
@@ -373,10 +400,11 @@ directory.
 | Access requests | `ACCESS_REQUEST_APPROVER_EMAIL`, `ACCESS_REQUEST_TOKEN_EXPIRE_MINUTES`, `ACCESS_REQUEST_COOLDOWN_MINUTES` | Sends single-use approval/rejection links to the configured approver and decision mail to the requester. The example values expire review links after 1,440 minutes and throttle repeat requests for 15 minutes. |
 | Google OAuth | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` | Password alternative for active approved users. Production requires both credentials and the exact `${API_PREFIX}/auth/callback/google` URL. The backend uses state and PKCE and never places a JWT in a redirect URL. |
 | Microsoft Graph mail | `MICROSOFT_CLIENT_ID`, `MICROSOFT_TENANT_ID`, `MICROSOFT_CLIENT_SECRET`, `MICROSOFT_SENDER_EMAIL`, `MICROSOFT_GRAPH_TIMEOUT_SECONDS`, `PASSWORD_RESET_TOKEN_EXPIRE_MINUTES` | Shared Graph `Mail.Send` transport for outreach, password recovery, access review, and access decisions. The sender defaults to `accoya@ampedstrategy.com`; the request timeout defaults to 30 seconds, and reset tokens default to 15 minutes. |
+| Graph reply tracking | `EMAIL_REPLY_TRACKING_ENABLED`, `MICROSOFT_GRAPH_NOTIFICATION_URL`, `MICROSOFT_GRAPH_CLIENT_STATE`, `EMAIL_REPLY_WORKER_POLL_SECONDS`, `EMAIL_REPLY_RECONCILE_SECONDS`, `EMAIL_REPLY_HEARTBEAT_SECONDS`, `EMAIL_REPLY_STALE_SECONDS`, `EMAIL_REPLY_BACKFILL_DAYS` | Disabled by default. When enabled, requires mailbox-scoped `Application Mail.Read`, a public HTTPS callback, a 32-byte client-state secret, and the separate reply worker. Defaults to a 90-day metadata-only backfill and 60-second delta reconciliation. |
 | Frontend | `VITE_API_BASE_URL` | Optional full browser API base; include `/api` unless `API_PREFIX` changes. Development defaults to port 8000 on the page hostname; production defaults to same-origin `/api`. |
 
 Settings, including Graph mail and access-request configuration, and the configured
-email agent are process-cached. Restart FastAPI and all three workers after
+email agent are process-cached. Restart FastAPI and all four workers after
 changing environment values.
 
 ## Agent-centric PostgreSQL database
@@ -402,6 +430,10 @@ schema. It imports no old records and intentionally has no backfill path:
 - `0007_web_auth_security` normalizes account identities, disables legacy
   accounts until an administrator enables them, adds session revocation state,
   and invalidates legacy password-reset tokens. It does not create users.
+- `0011_email_reply_tracking` adds metadata-only reply correlation, Graph
+  subscription/checkpoint state, durable notification signals, and nullable
+  sent-item identifiers. Applying it does not read a mailbox or create a
+  subscription.
 
 PostgreSQL stores identifiers as native `UUID`, flexible source data as
 `JSONB`, timestamps as timezone-aware `TIMESTAMPTZ`, and agent/email lifecycle
@@ -427,6 +459,9 @@ leads 1 ---- * email_generation_jobs
                                                                         ^
                                                                         `---- optional retry_of_job_id
 
+email_delivery_jobs 1 ---- * email_replies ---- 1 leads
+graph_mailbox_sync_states 1 ---- * graph_mail_notifications
+
 earlybid_sync_runs            chat_messages            strategy_documents
 ```
 
@@ -439,6 +474,8 @@ earlybid_sync_runs            chat_messages            strategy_documents
 | `emails` | At most one mutable review email for a generated run through a unique, non-null `agent_run_id`. It stores unrestricted subject/body text, an optional independently editable plain-text signature, the editable optional recipient snapshot, review status, and timestamps. `lead_id` in the existing API response is derived through the run instead of duplicated. |
 | `email_status_events` | Append-only status history. The generated email starts with a `pending_review` event; later changes store previous/new status, optional actor, and timestamp. Status updates lock the email row so concurrent transitions retain a contiguous audit chain. Same-status requests are no-ops. |
 | `email_delivery_jobs` | Durable outbound work for one approved email. Each job retains the exact confirmed sender, recipient, subject, and body plus idempotency/retry links, stable Message-ID, requester, safe error code, and queue/lease/completion timestamps. Status is `queued`, `running`, `succeeded`, `failed`, or `delivery_unknown`; a partial unique index permits only one queued/running job per email. |
+| `email_replies` | Metadata-only inbound candidates keyed by immutable Graph and Internet message identifiers. Matched human messages retain lead/email/delivery links, sender, receive time, Outlook read state, classification, and match method; content and subjects are never stored. |
+| `graph_mailbox_sync_states` / `graph_mail_notifications` | Durable subscription expiry, delta/backfill checkpoints, scheduling, leases, safe errors, and coalesced message-refresh signals for the configured sender mailbox. |
 | `chat_messages` | Existing user/assistant chat history grouped by `session_id`. |
 | `strategy_documents` | Existing S3 document metadata; S3 remains the source of truth for document listing. |
 
@@ -579,6 +616,8 @@ ID. ORM internals and arbitrary raw feed fields are never added to the prompt.
 | PATCH | `/api/emails/{email_id}` | Edit the mutable recipient, subject, body, or signature |
 | POST | `/api/emails/{email_id}/status` | Update review status and append an audit event; approval requires the previewed content hash and clients cannot set `sent` |
 | POST | `/api/emails/{email_id}/send` | Authenticated, idempotent queueing of real Microsoft Graph delivery |
+| GET | `/api/email-replies/summary` | Read active-opportunity unread reply counts and mailbox synchronization health |
+| POST | `/api/microsoft-graph/mail-notifications` | Public Graph validation/change/lifecycle callback; normal payloads require the configured client state |
 | POST | `/api/documents/upload` | Upload a strategy document to S3 and save metadata |
 | GET | `/api/documents` | List strategy documents from S3 |
 | DELETE | `/api/documents/{doc_id}` | Delete an S3 document and best-effort metadata record |
@@ -672,6 +711,16 @@ resend while an unknown attempt exists must acknowledge that it could deliver
 a duplicate. Regeneration and editing are blocked while delivery is active,
 and unresolved unknown delivery blocks regeneration.
 
+### Metadata-only reply tracking
+
+The reply worker reconciles the existing `x-accoya-message-id` header in Sent
+Items to Graph's immutable message ID, RFC Internet message ID, and conversation
+ID. Incoming mail matches exact `In-Reply-To`/`References` values first and an
+unambiguous tracked conversation second. Outlook `isRead` remains authoritative:
+opening an opportunity in Accoya never marks mail read. The Overview count
+includes only unread human replies attached to active opportunities; the linked
+Opportunities view filters and orders those opportunities by latest reply.
+
 ### Development-only diagnostics
 
 With `APP_ENV=development`, OpenAPI additionally exposes:
@@ -720,17 +769,18 @@ python -m compileall -q app agent alembic
 python -m unittest discover -s agent/tests -t . -p "test_*.py"
 python -m unittest tests.test_email_generation_queue -v
 python -m unittest tests.test_email_delivery_queue -v
+python -m unittest tests.test_email_reply_tracking -v
 python -m unittest tests.test_earlybid_sync_scheduler -v
 python -m unittest discover -s tests -v
 
 # From frontend/
-npm run test:run -- src/features/opportunities/Opportunities.test.tsx src/lib/api.test.ts
+npm run test:run -- src/features/overview/OverviewPage.test.tsx src/features/opportunities/Opportunities.test.tsx src/lib/api.test.ts
 npm run lint
 npm run build
 ```
 
 The offline suites cover new-only automatic queueing, replay-safe generation
-and delivery queueing, editable/default recipient and signature behavior,
+and delivery queueing, reply correlation/read-state synchronization, editable/default recipient and signature behavior,
 approval-preview and content-hash rules, definite/unknown fake Graph outcomes, workspace ordering
 and staleness, provider-free worker outcomes, and the rule that API handlers
 never perform provider delivery. Existing ingestion coverage includes
@@ -754,7 +804,7 @@ whose name ends in `_test`:
 ```powershell
 # From backend/; the local Docker PostgreSQL instance listens on port 5432.
 $env:ACCOYA_TEST_DATABASE_URL="postgresql+psycopg2://postgres:postgres@localhost:5432/ai_marketing_test"
-python -m unittest tests.test_postgres_auth_migration tests.test_postgres_agent_database tests.test_postgres_email_delivery -v
+python -m unittest tests.test_postgres_auth_migration tests.test_postgres_agent_database tests.test_postgres_email_delivery tests.test_postgres_email_reply_tracking -v
 Remove-Item Env:ACCOYA_TEST_DATABASE_URL
 ```
 
@@ -881,12 +931,13 @@ restored queue rows can repeat calls or Microsoft Graph delivery.
   and sent emails are not indexed into the knowledge base.
 - Document upload does not start a Bedrock KB ingestion job.
 - There is no bundled process supervisor, CI workflow, or AWS deployment
-  configuration. FastAPI and all three workers must be deployed and supervised
+  configuration. FastAPI and all four workers must be deployed and supervised
   as separate processes.
-- Deploy the database migration, API, generation worker, delivery worker, and
-  sync worker together. Starting the delivery worker authorizes queued live
+- Deploy the database migration, API, generation worker, delivery worker, reply
+  worker, and sync worker together. Starting the delivery worker authorizes queued live
   Graph sends; starting the sync worker authorizes live daily EarlyBid calls
-  and downstream draft queueing. Do not use either as a health check or
+  and downstream draft queueing. Starting the reply worker authorizes live
+  Graph mailbox reads. Do not use these workers as a health check or
   automated test.
 - EarlyBid does not supply an immutable opportunity ID. A project rename or
   location correction therefore produces a new lead identity; reconciliation

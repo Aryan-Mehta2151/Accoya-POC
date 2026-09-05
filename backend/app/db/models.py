@@ -8,6 +8,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -82,6 +83,27 @@ class EmailDeliveryJobStatus(str, enum.Enum):
     delivery_unknown = 'delivery_unknown'
 
 
+class EmailReplyClassification(str, enum.Enum):
+    human = "human"
+    automatic = "automatic"
+    bounce = "bounce"
+    ambiguous = "ambiguous"
+    unmatched = "unmatched"
+
+
+class EmailReplyMatchMethod(str, enum.Enum):
+    references = "references"
+    conversation = "conversation"
+    none = "none"
+
+
+class GraphMailboxSyncStatus(str, enum.Enum):
+    initializing = "initializing"
+    idle = "idle"
+    running = "running"
+    error = "error"
+
+
 class EarlyBidSyncRunStatus(str, enum.Enum):
     queued = "queued"
     running = "running"
@@ -119,6 +141,18 @@ _EMAIL_DELIVERY_JOB_STATUS = Enum(
 _EARLYBID_SYNC_RUN_STATUS = Enum(
     EarlyBidSyncRunStatus,
     name="earlybid_sync_run_status",
+)
+_EMAIL_REPLY_CLASSIFICATION = Enum(
+    EmailReplyClassification,
+    name="email_reply_classification",
+)
+_EMAIL_REPLY_MATCH_METHOD = Enum(
+    EmailReplyMatchMethod,
+    name="email_reply_match_method",
+)
+_GRAPH_MAILBOX_SYNC_STATUS = Enum(
+    GraphMailboxSyncStatus,
+    name="graph_mailbox_sync_status",
 )
 _LEAD_REVIEW_STATUS = Enum(
     LeadReviewStatus,
@@ -227,6 +261,10 @@ class Lead(Base):
     email_generation_jobs: Mapped[list[EmailGenerationJob]] = relationship(
         back_populates="lead",
         cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    email_replies: Mapped[list[EmailReply]] = relationship(
+        back_populates="lead",
         passive_deletes=True,
     )
 
@@ -673,6 +711,10 @@ class Email(Base):
             EmailDeliveryJob.id.desc(),
         ),
     )
+    email_replies: Mapped[list[EmailReply]] = relationship(
+        back_populates="email",
+        passive_deletes=True,
+    )
 
     @property
     def lead_id(self) -> str:
@@ -796,6 +838,21 @@ class EmailDeliveryJob(Base):
             'ix_email_delivery_jobs_retry_of_job_id',
             'retry_of_job_id',
         ),
+        Index(
+            "uq_email_delivery_jobs_graph_message_id",
+            "graph_message_id",
+            unique=True,
+            postgresql_where=text("graph_message_id IS NOT NULL"),
+            sqlite_where=text("graph_message_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_email_delivery_jobs_internet_message_id",
+            "internet_message_id",
+            unique=True,
+            postgresql_where=text("internet_message_id IS NOT NULL"),
+            sqlite_where=text("internet_message_id IS NOT NULL"),
+        ),
+        Index("ix_email_delivery_jobs_conversation_id", "conversation_id"),
     )
 
     id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
@@ -842,6 +899,12 @@ class EmailDeliveryJob(Base):
     )
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    graph_message_id: Mapped[str | None] = mapped_column(Text)
+    internet_message_id: Mapped[str | None] = mapped_column(Text)
+    conversation_id: Mapped[str | None] = mapped_column(Text)
+    sent_item_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
     email: Mapped[Email] = relationship(back_populates='delivery_jobs')
     retry_of: Mapped[EmailDeliveryJob | None] = relationship(
@@ -853,6 +916,208 @@ class EmailDeliveryJob(Base):
         back_populates='retry_of',
         foreign_keys=[retry_of_job_id],
     )
+    email_replies: Mapped[list[EmailReply]] = relationship(
+        back_populates="delivery_job",
+        passive_deletes=True,
+    )
+
+
+class EmailReply(Base):
+    """Metadata-only projection of a possible reply in the sender mailbox."""
+
+    __tablename__ = "email_replies"
+    __table_args__ = (
+        UniqueConstraint(
+            "mailbox_email",
+            "graph_message_id",
+            name="uq_email_replies_mailbox_graph_message",
+        ),
+        UniqueConstraint(
+            "mailbox_email",
+            "internet_message_id",
+            name="uq_email_replies_mailbox_internet_message",
+        ),
+        Index(
+            "ix_email_replies_unread_lead_received",
+            "lead_id",
+            "is_read",
+            "received_at",
+        ),
+        Index("ix_email_replies_conversation", "mailbox_email", "conversation_id"),
+        Index("ix_email_replies_classification", "classification"),
+    )
+
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
+    mailbox_email: Mapped[str] = mapped_column(Text, nullable=False)
+    graph_message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    internet_message_id: Mapped[str | None] = mapped_column(Text)
+    conversation_id: Mapped[str | None] = mapped_column(Text)
+    reference_message_ids: Mapped[list[str]] = mapped_column(
+        _JSONB,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    lead_id: Mapped[str | None] = mapped_column(
+        _UUID,
+        ForeignKey("leads.id", ondelete="SET NULL"),
+    )
+    email_id: Mapped[str | None] = mapped_column(
+        _UUID,
+        ForeignKey("emails.id", ondelete="SET NULL"),
+    )
+    delivery_job_id: Mapped[str | None] = mapped_column(
+        _UUID,
+        ForeignKey("email_delivery_jobs.id", ondelete="SET NULL"),
+    )
+    sender_email: Mapped[str | None] = mapped_column(Text)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_read: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    classification: Mapped[EmailReplyClassification] = mapped_column(
+        _EMAIL_REPLY_CLASSIFICATION,
+        nullable=False,
+        default=EmailReplyClassification.unmatched,
+    )
+    match_method: Mapped[EmailReplyMatchMethod] = mapped_column(
+        _EMAIL_REPLY_MATCH_METHOD,
+        nullable=False,
+        default=EmailReplyMatchMethod.none,
+    )
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    lead: Mapped[Lead | None] = relationship(back_populates="email_replies")
+    email: Mapped[Email | None] = relationship(back_populates="email_replies")
+    delivery_job: Mapped[EmailDeliveryJob | None] = relationship(
+        back_populates="email_replies"
+    )
+
+
+class GraphMailboxSyncState(Base):
+    """Durable subscription, checkpoint, schedule, and lease for one mailbox."""
+
+    __tablename__ = "graph_mailbox_sync_states"
+    __table_args__ = (
+        CheckConstraint(
+            "(status = 'running' AND claimed_by IS NOT NULL "
+            "AND claimed_at IS NOT NULL AND heartbeat_at IS NOT NULL) OR "
+            "(status <> 'running' AND claimed_by IS NULL "
+            "AND claimed_at IS NULL AND heartbeat_at IS NULL)",
+            name="ck_graph_mailbox_sync_states_lease",
+        ),
+        UniqueConstraint(
+            "subscription_id",
+            name="uq_graph_mailbox_sync_states_subscription_id",
+        ),
+        Index("ix_graph_mailbox_sync_states_due", "status", "next_sync_at"),
+    )
+
+    mailbox_email: Mapped[str] = mapped_column(Text, primary_key=True)
+    status: Mapped[GraphMailboxSyncStatus] = mapped_column(
+        _GRAPH_MAILBOX_SYNC_STATUS,
+        nullable=False,
+        default=GraphMailboxSyncStatus.initializing,
+        server_default=GraphMailboxSyncStatus.initializing.value,
+    )
+    subscription_id: Mapped[str | None] = mapped_column(Text)
+    subscription_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    inbox_delta_link: Mapped[str | None] = mapped_column(Text)
+    sent_delta_link: Mapped[str | None] = mapped_column(Text)
+    mailbox_scan_link: Mapped[str | None] = mapped_column(Text)
+    sent_scan_link: Mapped[str | None] = mapped_column(Text)
+    sent_backfill_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    backfill_cutoff_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    initial_backfill_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    force_resync: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
+    next_sync_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_by: Mapped[str | None] = mapped_column(Text)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_succeeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class GraphMailNotification(Base):
+    """Coalesced durable signal that a Graph message must be refreshed."""
+
+    __tablename__ = "graph_mail_notifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "mailbox_email",
+            "graph_message_id",
+            name="uq_graph_mail_notifications_mailbox_message",
+        ),
+        CheckConstraint(
+            "(claimed_by IS NULL AND claimed_at IS NULL AND heartbeat_at IS NULL) OR "
+            "(claimed_by IS NOT NULL AND claimed_at IS NOT NULL "
+            "AND heartbeat_at IS NOT NULL)",
+            name="ck_graph_mail_notifications_lease",
+        ),
+        Index(
+            "ix_graph_mail_notifications_due",
+            "mailbox_email",
+            "requested_at",
+            "processed_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(_UUID, primary_key=True, default=_uuid)
+    mailbox_email: Mapped[str] = mapped_column(Text, nullable=False)
+    graph_message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    change_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    subscription_id: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_by: Mapped[str | None] = mapped_column(Text)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    error_code: Mapped[str | None] = mapped_column(Text)
 
 
 class EmailStatusEvent(Base):

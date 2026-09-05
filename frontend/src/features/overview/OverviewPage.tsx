@@ -4,6 +4,7 @@ import {
   BookOpenText,
   CircleCheck,
   MailCheck,
+  MessageCircleReply,
   Target,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -37,10 +38,16 @@ export function OverviewPage() {
     refetchInterval: 60_000,
   });
   const emailsQuery = useQuery({ queryKey: queryKeys.emails, queryFn: api.listEmails });
+  const repliesQuery = useQuery({
+    queryKey: queryKeys.emailReplySummary,
+    queryFn: api.getEmailReplySummary,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  });
   const documentsQuery = useQuery({ queryKey: queryKeys.documents, queryFn: api.listDocuments });
 
-  const isInitialLoading = leadsQuery.isLoading && emailsQuery.isLoading && documentsQuery.isLoading;
-  const allFailed = leadsQuery.isError && emailsQuery.isError && documentsQuery.isError;
+  const isInitialLoading = leadsQuery.isLoading && emailsQuery.isLoading && repliesQuery.isLoading && documentsQuery.isLoading;
+  const allFailed = leadsQuery.isError && emailsQuery.isError && repliesQuery.isError && documentsQuery.isError;
 
   if (isInitialLoading) return <LoadingState label='Preparing your workspace…' />;
   if (allFailed) {
@@ -51,6 +58,7 @@ export function OverviewPage() {
         onRetry={() => void Promise.all([
           leadsQuery.refetch(),
           emailsQuery.refetch(),
+          repliesQuery.refetch(),
           documentsQuery.refetch(),
         ])}
       />
@@ -59,7 +67,9 @@ export function OverviewPage() {
 
   const leads = leadsQuery.data ?? [];
   const emails = emailsQuery.data ?? [];
+  const replies = repliesQuery.data;
   const documents = documentsQuery.data ?? [];
+  const replyTotalsCurrent = !repliesQuery.isError && replies?.sync_status === 'healthy';
   const activeLeadIds = new Set(leads.map((lead) => lead.id));
   const currentEmails = newestEmailsByLead(emails).filter((email) => activeLeadIds.has(email.lead_id));
   const pending = currentEmails.filter((email) => email.status === 'pending_review');
@@ -81,7 +91,7 @@ export function OverviewPage() {
         }
       />
 
-      {(leadsQuery.isError || emailsQuery.isError || documentsQuery.isError) && (
+      {(leadsQuery.isError || emailsQuery.isError || repliesQuery.isError || documentsQuery.isError) && (
         <div className={styles.partialNotice} role='status'>
           Some live totals are temporarily unavailable. The rest of your workspace is ready.
         </div>
@@ -91,8 +101,23 @@ export function OverviewPage() {
         <Metric icon={<Target />} label='Opportunities' value={leadsQuery.isError ? '—' : leads.length} tone='forest' to='/opportunities' />
         <Metric icon={<MailCheck />} label='Needs review' value={emailMetricsUnavailable ? '—' : pending.length} tone='clay' to='/opportunities?outreach=pending_review' />
         <Metric icon={<CircleCheck />} label='Sent' value={emailMetricsUnavailable ? '—' : sent.length} tone='timber' to='/opportunities?outreach=sent' />
+        {replies?.sync_status !== 'disabled' ? (
+          <Metric
+            icon={<MessageCircleReply />}
+            label='Unread replies'
+            value={replyTotalsCurrent ? replies.unread_reply_count : '—'}
+            tone='mist'
+            to='/opportunities?replies=unread&sort=latest_reply'
+          />
+        ) : null}
         <Metric icon={<BookOpenText />} label='Strategy docs' value={documentsQuery.isError ? '—' : documents.length} tone='sage' to='/knowledge' />
       </section>
+
+      {(repliesQuery.isError || (replies && replies.sync_status !== 'healthy' && replies.sync_status !== 'disabled')) ? (
+        <div className={styles.replyNotice} role='status'>
+          Reply totals are {!repliesQuery.isError && replies?.sync_status === 'initializing' ? 'being prepared' : 'temporarily unavailable'}; cached data is not shown as current.
+        </div>
+      ) : null}
 
       <div className={styles.grid}>
         <section className={styles.panel}>

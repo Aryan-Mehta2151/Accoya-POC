@@ -10,7 +10,7 @@
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 14px;
   margin-bottom: 22px;
 }
@@ -65,6 +65,15 @@
 .clay { background: #ead2c8; color: #6f321f; }
 .timber { background: var(--color-timber-soft); color: #664a24; }
 .sage { background: #dbe4d8; color: #34533b; }
+.mist { background: #dce8ea; color: #28515a; }
+
+.replyNotice {
+  padding: 10px 14px;
+  margin: -10px 0 22px;
+  border-left: 3px solid #7d5c25;
+  color: var(--color-muted-strong);
+  font-size: 0.78rem;
+}
 
 .grid {
   display: grid;

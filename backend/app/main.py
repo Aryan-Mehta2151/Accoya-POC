@@ -6,7 +6,16 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.dependencies.auth import get_current_user, require_csrf
-from app.api.routes import agent_runs, auth, chat, documents, emails, leads
+from app.api.routes import (
+    agent_runs,
+    auth,
+    chat,
+    documents,
+    email_replies,
+    emails,
+    graph_webhooks,
+    leads,
+)
 from app.config import get_settings
 from app.db.database import check_database_schema
 from app.services.auth_security import validate_web_auth_settings
@@ -63,6 +72,7 @@ def health() -> dict[str, str]:
 
 
 app.include_router(auth.router, prefix=settings.api_prefix)
+app.include_router(graph_webhooks.router, prefix=settings.api_prefix)
 
 protected_api = APIRouter(
     dependencies=[
@@ -73,6 +83,7 @@ protected_api = APIRouter(
 protected_api.include_router(leads.router)
 protected_api.include_router(documents.router)
 protected_api.include_router(emails.router)
+protected_api.include_router(email_replies.router)
 protected_api.include_router(agent_runs.router)
 protected_api.include_router(chat.router)
 

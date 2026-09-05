@@ -269,6 +269,40 @@ describe('Opportunities list', () => {
     await waitFor(() => expect(within(table).getAllByRole('row')).toHaveLength(2));
   });
 
+  it('filters unread replies independently and orders dashboard click-through by newest reply', async () => {
+    vi.mocked(api.listLeads).mockResolvedValue([
+      lead({
+        id: 'reply-old',
+        project: 'Older Reply Project',
+        unread_reply_count: 1,
+        last_reply_at: '2026-07-02T10:00:00Z',
+      }),
+      lead({
+        id: 'no-reply',
+        project: 'No Reply Project',
+        unread_reply_count: 0,
+      }),
+      lead({
+        id: 'reply-new',
+        project: 'Newest Reply Project',
+        unread_reply_count: 2,
+        last_reply_at: '2026-07-03T10:00:00Z',
+      }),
+    ]);
+    renderAt('/opportunities?replies=unread&sort=latest_reply');
+    const table = await screen.findByRole('table', { name: 'EarlyBid opportunities' });
+    const rows = within(table).getAllByRole('row').slice(1);
+
+    expect(rows.map((row) => row.getAttribute('aria-label'))).toEqual([
+      'Open opportunity Newest Reply Project',
+      'Open opportunity Older Reply Project',
+    ]);
+    expect(within(table).queryByText('No Reply Project')).not.toBeInTheDocument();
+    expect(within(table).getByText('2 unread replies')).toBeInTheDocument();
+    expect(screen.getByText('Sorted by latest reply')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Replies' })).toHaveValue('unread');
+  });
+
   it('sorts from the contact and score column headers and clears back to score order', async () => {
     vi.mocked(api.listLeads).mockResolvedValue([
       lead({
@@ -393,6 +427,8 @@ describe('Opportunities list', () => {
           review_status: 'deleted',
           deleted_by: 'operator',
           deleted_reasons: ['not_relevant'],
+          unread_reply_count: 0,
+          last_reply_at: '2026-07-03T10:00:00Z',
         })]
         : [lead()]
     ));
@@ -404,6 +440,7 @@ describe('Opportunities list', () => {
 
     await waitFor(() => expect(api.listLeads).toHaveBeenCalledWith('dismissed'));
     expect((await screen.findAllByText(/Deleted by operator/)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('0 unread replies').length).toBeGreaterThan(0);
   });
 
   it('shows the latest automatic result and next Pacific midnight without posting on mount', async () => {

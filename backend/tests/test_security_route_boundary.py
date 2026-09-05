@@ -44,6 +44,8 @@ class SecurityRouteBoundaryTests(unittest.TestCase):
             for route in self._effective_routes()
             if route.path.startswith(f"{self.api_prefix}/")
             and not route.path.startswith(f"{self.api_prefix}/auth/")
+            and route.path
+            != f"{self.api_prefix}/microsoft-graph/mail-notifications"
         ]
 
         self.assertTrue(business_routes)
@@ -102,6 +104,14 @@ class SecurityRouteBoundaryTests(unittest.TestCase):
         ].lower()
         self.assertIn("x-csrf-token", allowed_headers)
         self.assertIn("idempotency-key", allowed_headers)
+
+        validation = self.client.post(
+            f"{self.api_prefix}/microsoft-graph/mail-notifications",
+            params={"validationToken": "opaque-token"},
+        )
+        self.assertEqual(validation.status_code, 200)
+        self.assertEqual(validation.text, "opaque-token")
+        self.assertEqual(validation.headers["content-type"], "text/plain; charset=utf-8")
 
     def test_security_settings_are_validated_before_database_startup(self) -> None:
         calls: list[str] = []

@@ -34,6 +34,22 @@ export type Lead = {
   created_at: string;
   current_email?: EmailSummary | null;
   latest_generation?: EmailGenerationJob | null;
+  unread_reply_count?: number;
+  last_reply_at?: string | null;
+};
+
+export type EmailReplySyncStatus =
+  | 'initializing'
+  | 'healthy'
+  | 'stale'
+  | 'disabled'
+  | 'error';
+
+export type EmailReplySummary = {
+  unread_reply_count: number;
+  replied_opportunity_count: number;
+  last_synced_at: string | null;
+  sync_status: EmailReplySyncStatus;
 };
 
 export type SyncResult = {

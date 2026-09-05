@@ -102,6 +102,8 @@ class CurrentEmailSummary(BaseModel):
 class LeadListRead(LeadRead):
     current_email: CurrentEmailSummary | None = None
     latest_generation: EmailGenerationJobRead | None = None
+    unread_reply_count: int = 0
+    last_reply_at: datetime | None = None
 
 
 class LeadWorkspaceRead(BaseModel):

@@ -182,7 +182,7 @@ class PostgresEmailDeliveryTests(unittest.TestCase):
         with self.engine.connect() as connection:
             self.assertEqual(
                 set(database.get_current_schema_heads(connection)),
-                {"0007_web_auth_security"},
+                set(database.get_expected_schema_heads()),
             )
 
         inspector = inspect(self.engine)
@@ -214,6 +214,10 @@ class PostgresEmailDeliveryTests(unittest.TestCase):
                 "send_started_at",
                 "accepted_at",
                 "completed_at",
+                "graph_message_id",
+                "internet_message_id",
+                "conversation_id",
+                "sent_item_observed_at",
             },
         )
         self.assertIsInstance(columns["id"]["type"], UUID)

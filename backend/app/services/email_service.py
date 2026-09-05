@@ -83,6 +83,12 @@ def _graph_token(settings: Settings) -> str:
     return access_token
 
 
+def graph_access_token(settings: Settings) -> str:
+    """Return an app-only Graph token for separately supervised mail workers."""
+
+    return _graph_token(settings)
+
+
 def send_outreach_email(
     *,
     sender_email: str,

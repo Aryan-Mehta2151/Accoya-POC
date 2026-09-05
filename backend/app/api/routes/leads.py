@@ -28,6 +28,7 @@ from app.schemas.lead import (
 )
 from app.services import (
     earlybid_sync_service,
+    email_reply_service,
     email_generation_service,
     lead_feed_service,
 )
@@ -142,6 +143,10 @@ def list_leads(
         .where(Lead.review_status == review_status)
         .order_by(Lead.score.desc().nullslast())
     ).all()
+    reply_summaries = email_reply_service.unread_reply_summaries(
+        db,
+        (lead.id for lead in leads),
+    )
     return [
         LeadListRead(
             **LeadRead.model_validate(lead).model_dump(),
@@ -151,6 +156,8 @@ def list_leads(
             latest_generation=email_generation_service.latest_generation_job(
                 db, lead.id
             ),
+            unread_reply_count=reply_summaries.get(lead.id, (0, None))[0],
+            last_reply_at=reply_summaries.get(lead.id, (0, None))[1],
         )
         for lead in leads
     ]

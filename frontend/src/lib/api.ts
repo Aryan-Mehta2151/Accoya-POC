@@ -6,6 +6,7 @@ import type {
   Email,
   EmailDeliveryJob,
   EmailGenerationJob,
+  EmailReplySummary,
   EmailStatus,
   Lead,
   LeadWorkspace,
@@ -359,6 +360,7 @@ export const api = {
     }),
 
   listEmails: () => request<Email[]>('/emails'),
+  getEmailReplySummary: () => request<EmailReplySummary>('/email-replies/summary'),
   getEmail: (emailId: string) =>
     request<Email>(`/emails/${encodeURIComponent(emailId)}`),
   editEmail: (

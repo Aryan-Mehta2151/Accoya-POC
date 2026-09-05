@@ -100,6 +100,18 @@ class Settings(BaseSettings):
     microsoft_sender_email: EmailStr = "accoya@ampedstrategy.com"
     microsoft_graph_timeout_seconds: float = 30.0
 
+    # Microsoft Graph reply tracking. This is deliberately opt-in because
+    # enabling the worker authorizes mailbox reads and creates a webhook
+    # subscription against the configured sender mailbox.
+    email_reply_tracking_enabled: bool = False
+    microsoft_graph_notification_url: str = ""
+    microsoft_graph_client_state: str = ""
+    email_reply_worker_poll_seconds: float = 2.0
+    email_reply_reconcile_seconds: float = 60.0
+    email_reply_heartbeat_seconds: float = 15.0
+    email_reply_stale_seconds: float = 300.0
+    email_reply_backfill_days: int = 90
+
     # Frontend URL (for reset password links)
     frontend_url: str = "http://localhost:5173"
 

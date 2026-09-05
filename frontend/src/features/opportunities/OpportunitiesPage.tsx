@@ -22,8 +22,9 @@ import type { EarlyBidSyncRunStatus, EarlyBidSyncStatus, Lead } from "../../type
 import styles from "./opportunities.module.css";
 
 type ScoreSort = "desc" | "asc";
-type OpportunitySort = "score_desc" | "score_asc" | "contact_present" | "contact_missing";
+type OpportunitySort = "score_desc" | "score_asc" | "contact_present" | "contact_missing" | "latest_reply";
 type LeadView = "active" | "dismissed";
+type ReplyFilter = "" | "unread";
 type OutreachFilter =
   | ""
   | "pending_review"
@@ -50,10 +51,18 @@ const sortSummaryLabels: Record<OpportunitySort, string> = {
   score_asc: "Sorted by score: low to high",
   contact_present: "Sorted by contact: provided first",
   contact_missing: "Sorted by contact: missing first",
+  latest_reply: "Sorted by latest reply",
 };
 
 const scoreFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 1,
+});
+
+const replyTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
 });
 
 const automaticSyncActiveStatuses: ReadonlySet<EarlyBidSyncRunStatus> = new Set([
@@ -255,6 +264,12 @@ function hasContact(lead: Lead) {
 }
 
 function compareLeads(a: Lead, b: Lead, sort: OpportunitySort) {
+  if (sort === "latest_reply") {
+    const aTime = a.last_reply_at ? Date.parse(a.last_reply_at) : Number.NEGATIVE_INFINITY;
+    const bTime = b.last_reply_at ? Date.parse(b.last_reply_at) : Number.NEGATIVE_INFINITY;
+    if (aTime !== bTime) return bTime - aTime;
+    return compareScores(a, b, "desc");
+  }
   if (sort === "score_asc") return compareScores(a, b, "asc");
   if (sort === "score_desc") return compareScores(a, b, "desc");
 
@@ -269,7 +284,7 @@ function compareLeads(a: Lead, b: Lead, sort: OpportunitySort) {
 
 function parseOpportunitySort(value: string | null): OpportunitySort {
   if (value === "asc") return "score_asc";
-  if (value === "contact_present" || value === "contact_missing") return value;
+  if (value === "contact_present" || value === "contact_missing" || value === "latest_reply") return value;
   return "score_desc";
 }
 
@@ -313,6 +328,7 @@ function matchesOutreachFilter(lead: Lead, filter: OutreachFilter) {
 }
 
 function OpportunityOutreachBadges({ lead }: { lead: Lead }) {
+  const unreadReplies = lead.unread_reply_count ?? 0;
   return (
     <span className={styles.outreachBadges}>
       {generationIsActive(lead) ? <StatusBadge status="generating" /> : null}
@@ -321,6 +337,12 @@ function OpportunityOutreachBadges({ lead }: { lead: Lead }) {
       {!lead.current_email && !generationIsActive(lead) && !generationHasIssue(lead)
         ? <StatusBadge status="no_email" />
         : null}
+      {unreadReplies > 0 || lead.last_reply_at ? (
+        <span className={styles.replySummaryBadge}>
+          <strong>{unreadReplies} unread {unreadReplies === 1 ? "reply" : "replies"}</strong>
+          {lead.last_reply_at ? <small>Latest {replyTimeFormatter.format(new Date(lead.last_reply_at))}</small> : null}
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -408,6 +430,7 @@ export function OpportunitiesPage() {
   const outreach: OutreachFilter = outreachOptions.some((option) => option.value === outreachParam)
     ? outreachParam as OutreachFilter
     : "";
+  const replies: ReplyFilter = searchParams.get("replies") === "unread" ? "unread" : "";
   const opportunitySort = parseOpportunitySort(searchParams.get("sort"));
 
   // Adopt the query value when navigation changes it, without an extra render pass.
@@ -509,8 +532,9 @@ export function OpportunitiesPage() {
       .filter((lead) => !needle || leadSearchText(lead).includes(needle))
       .filter((lead) => !state || lead.state === state)
       .filter((lead) => matchesOutreachFilter(lead, outreach))
+      .filter((lead) => !replies || (lead.unread_reply_count ?? 0) > 0)
       .sort((a, b) => compareLeads(a, b, opportunitySort));
-  }, [leads, opportunitySort, outreach, searchInput, state]);
+  }, [leads, opportunitySort, outreach, replies, searchInput, state]);
 
   const updateParam = (name: string, value: string) => {
     const next = new URLSearchParams(searchParams);
@@ -523,7 +547,7 @@ export function OpportunitiesPage() {
     setSearchInput("");
     setSearchParams(view === "dismissed" ? { view: "dismissed" } : {}, { replace: true });
   };
-  const hasFilters = Boolean(searchInput || state || outreach || searchParams.has("sort"));
+  const hasFilters = Boolean(searchInput || state || outreach || replies || searchParams.has("sort"));
   const isMutating = syncMutation.isPending || uploadMutation.isPending;
   const automaticSyncActive = automaticSyncIsActive(latestAutomaticRun?.status);
   const manualSyncDisabled = isMutating || automaticSyncActive;
@@ -692,6 +716,14 @@ export function OpportunitiesPage() {
                 {outreachOptions.map((option) => (
                   <option key={option.value || "all"} value={option.value}>{option.label}</option>
                 ))}
+              </select>
+            </label>
+
+            <label className={styles.selectField}>
+              <span>Replies</span>
+              <select value={replies} onChange={(event) => updateParam("replies", event.target.value)}>
+                <option value="">All replies</option>
+                <option value="unread">Unread replies</option>
               </select>
             </label>
 
