@@ -8,6 +8,7 @@ import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { api, ApiError } from '../../lib/api';
+import { downloadCsv } from '../../lib/csv';
 import { queryKeys } from '../../lib/queryKeys';
 import type {
   EarlyBidSyncRunStatus,
@@ -36,6 +37,14 @@ vi.mock('../../lib/api', async (importOriginal) => {
       setEmailStatus: vi.fn(),
       sendEmail: vi.fn(),
     },
+  };
+});
+
+vi.mock('../../lib/csv', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/csv')>();
+  return {
+    ...actual,
+    downloadCsv: vi.fn(),
   };
 });
 
@@ -233,6 +242,7 @@ describe('Opportunities list', () => {
 
     expect(await screen.findByRole('heading', { name: 'Last automatic sync completed' })).toBeInTheDocument();
     expect(screen.getByText('Loading opportunities…')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Export CSV' })).toBeDisabled();
   });
 
   it('keeps automatic sync status visible when opportunities fail to load', async () => {
@@ -241,6 +251,7 @@ describe('Opportunities list', () => {
 
     expect(await screen.findByRole('heading', { name: 'Opportunities could not be loaded' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Last automatic sync completed' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Export CSV' })).toBeDisabled();
   });
 
   it('keeps automatic sync status and its manual-sync guard in the empty state', async () => {
@@ -250,6 +261,7 @@ describe('Opportunities list', () => {
 
     expect(await screen.findByRole('heading', { name: 'No opportunities yet' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Automatic sync queued' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Export CSV' })).toBeDisabled();
     const syncButtons = screen.getAllByRole('button', { name: 'Sync EarlyBid' });
     expect(syncButtons).toHaveLength(2);
     syncButtons.forEach((button) => expect(button).toBeDisabled());
@@ -332,7 +344,7 @@ describe('Opportunities list', () => {
     const rowOrder = () => within(table).getAllByRole('row').slice(1).map((row) => row.getAttribute('aria-label'));
     const scoreHeader = within(table).getByRole('button', { name: 'Sort score low to high' }).closest('th');
 
-    expect(screen.queryByRole('combobox', { name: 'Sort by' })).not.toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Sort by' })).toHaveValue('score_desc');
     expect(scoreHeader).toHaveAttribute('aria-sort', 'descending');
 
     await user.click(within(table).getByRole('button', { name: 'Sort contacts with provided first' }));
@@ -397,6 +409,106 @@ describe('Opportunities list', () => {
       'Open opportunity Harbour Arts Centre',
     ]);
     expect(screen.getByText('Sorted by score: low to high')).toBeInTheDocument();
+  });
+
+  it('sorts by date added from the shared control and date column header', async () => {
+    vi.mocked(api.listLeads).mockResolvedValue([
+      lead({ id: 'same-low', project: 'Same Date Lower Score', score: 40, created_at: '2026-07-03T10:00:00Z' }),
+      lead({ id: 'oldest', project: 'Oldest Project', score: 90, created_at: '2026-07-01T10:00:00Z' }),
+      lead({ id: 'same-high', project: 'Same Date Higher Score', score: 80, created_at: '2026-07-03T10:00:00Z' }),
+      lead({ id: 'invalid', project: 'Invalid Date Project', score: 100, created_at: 'not-a-date' }),
+    ]);
+    const { user, router } = renderAt('/opportunities');
+    const table = await screen.findByRole('table', { name: 'EarlyBid opportunities' });
+    const rowOrder = () => within(table).getAllByRole('row').slice(1).map((row) => row.getAttribute('aria-label'));
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Sort by' }), 'created_desc');
+
+    expect(router.state.location.search).toBe('?sort=created_desc');
+    expect(rowOrder()).toEqual([
+      'Open opportunity Same Date Higher Score',
+      'Open opportunity Same Date Lower Score',
+      'Open opportunity Oldest Project',
+      'Open opportunity Invalid Date Project',
+    ]);
+    expect(within(table).getByRole('button', { name: 'Sort date added oldest first' }).closest('th'))
+      .toHaveAttribute('aria-sort', 'descending');
+    expect(screen.getByText('Sorted by date added: newest first')).toBeInTheDocument();
+
+    await user.click(within(table).getByRole('button', { name: 'Sort date added oldest first' }));
+
+    expect(router.state.location.search).toBe('?sort=created_asc');
+    expect(screen.getByRole('combobox', { name: 'Sort by' })).toHaveValue('created_asc');
+    expect(rowOrder()).toEqual([
+      'Open opportunity Oldest Project',
+      'Open opportunity Same Date Higher Score',
+      'Open opportunity Same Date Lower Score',
+      'Open opportunity Invalid Date Project',
+    ]);
+    expect(within(table).getByRole('button', { name: 'Sort date added newest first' }).closest('th'))
+      .toHaveAttribute('aria-sort', 'ascending');
+  });
+
+  it('exports only the filtered current view in its selected order', async () => {
+    vi.mocked(api.listLeads).mockResolvedValue([
+      lead({
+        id: 'new-tx',
+        external_id: 'external-new',
+        project: 'New Texas Project',
+        location: 'Austin',
+        state: 'TX',
+        review_status: 'deleted',
+        deleted_by: 'client',
+        deleted_reasons: ['Duplicate', 'Closed'],
+        created_at: '2026-07-05T10:00:00Z',
+        meeting_date: 'Jul 17, 2026',
+        reported: { source: 'agenda' },
+        current_email: {
+          id: 'email-new',
+          status: 'pending_review',
+          recipient_email: 'review@example.com',
+          created_at: '2026-07-06T10:00:00Z',
+          updated_at: '2026-07-07T10:00:00Z',
+        },
+      }),
+      lead({
+        id: 'old-tx',
+        project: 'Old Texas Project',
+        location: 'Dallas',
+        state: 'TX',
+        review_status: 'deleted',
+        created_at: '2026-07-01T10:00:00Z',
+        summary: '=unsafe summary',
+      }),
+      lead({
+        id: 'other-state',
+        project: 'Oregon Project',
+        state: 'OR',
+        review_status: 'deleted',
+        created_at: '2026-06-01T10:00:00Z',
+      }),
+    ]);
+    const { user } = renderAt('/opportunities?view=dismissed&state=TX&sort=created_asc');
+
+    await screen.findByRole('table', { name: 'EarlyBid opportunities' });
+    await user.click(screen.getByRole('button', { name: 'Export CSV' }));
+
+    expect(api.listLeads).toHaveBeenCalledWith('dismissed');
+    expect(downloadCsv).toHaveBeenCalledOnce();
+    const [filename, csv] = vi.mocked(downloadCsv).mock.calls[0];
+    expect(filename).toMatch(/^accoya-opportunities-dismissed-\d{4}-\d{2}-\d{2}\.csv$/);
+    expect(csv).toContain('Record ID,External ID,Opportunity Status,Date Added');
+    expect(csv).toContain('Outreach Status,Outreach Recipient,Outreach Created At');
+    expect(csv).toContain("'=unsafe summary");
+    expect(csv).toContain('pending_review,review@example.com');
+    expect(csv).toContain('2026-07-17');
+    expect(csv).not.toContain('Jul 17, 2026');
+    expect(csv).not.toContain('Oregon Project');
+    expect(csv.indexOf('Old Texas Project')).toBeLessThan(csv.indexOf('New Texas Project'));
+
+    await user.clear(screen.getByPlaceholderText(/Search project/i));
+    await user.type(screen.getByPlaceholderText(/Search project/i), 'no matching project');
+    expect(screen.getByRole('button', { name: 'Export CSV' })).toBeDisabled();
   });
 
   it('runs explicit feed sync and CSV import mutations', async () => {

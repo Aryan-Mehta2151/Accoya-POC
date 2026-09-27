@@ -6,6 +6,7 @@ import {
   ArrowUpDown,
   CheckCircle2,
   Clock3,
+  Download,
   FileUp,
   MapPin,
   RefreshCw,
@@ -17,12 +18,21 @@ import { toast } from "sonner";
 
 import { EmptyState, ErrorState, LoadingState, PageHeader, StatusBadge } from "../../components/ui";
 import { api, ApiError } from "../../lib/api";
+import { createCsv, downloadCsv, normalizeDateForCsv, type CsvValue } from "../../lib/csv";
+import { formatDate } from "../../lib/format";
 import { queryKeys } from "../../lib/queryKeys";
 import type { EarlyBidSyncRunStatus, EarlyBidSyncStatus, Lead } from "../../types";
 import styles from "./opportunities.module.css";
 
 type ScoreSort = "desc" | "asc";
-type OpportunitySort = "score_desc" | "score_asc" | "contact_present" | "contact_missing" | "latest_reply";
+type OpportunitySort =
+  | "score_desc"
+  | "score_asc"
+  | "contact_present"
+  | "contact_missing"
+  | "latest_reply"
+  | "created_desc"
+  | "created_asc";
 type LeadView = "active" | "dismissed";
 type ReplyFilter = "" | "unread";
 type OutreachFilter =
@@ -46,12 +56,63 @@ const outreachOptions: Array<{ value: OutreachFilter; label: string }> = [
   { value: "no_email", label: "No email" },
 ];
 
+const sortOptions: Array<{ value: OpportunitySort; label: string }> = [
+  { value: "score_desc", label: "Score: high to low" },
+  { value: "score_asc", label: "Score: low to high" },
+  { value: "created_desc", label: "Date added: newest first" },
+  { value: "created_asc", label: "Date added: oldest first" },
+  { value: "contact_present", label: "Contact: provided first" },
+  { value: "contact_missing", label: "Contact: missing first" },
+  { value: "latest_reply", label: "Latest reply" },
+];
+
+const opportunityExportHeaders = [
+  "Record ID",
+  "External ID",
+  "Opportunity Status",
+  "Date Added",
+  "Source Feed",
+  "Source URL",
+  "Project",
+  "Section",
+  "Location",
+  "State",
+  "Score",
+  "Timing",
+  "Meeting Date",
+  "Due Date",
+  "Award Date",
+  "Start Date",
+  "Awarded To",
+  "Contact",
+  "Contact Email",
+  "Signal",
+  "Intelligence",
+  "Priority Reasons",
+  "Summary",
+  "Tags",
+  "Keywords Matched",
+  "Reported Details",
+  "Response Deadline Evidence",
+  "Deleted By",
+  "Deletion Reasons",
+  "Outreach Status",
+  "Outreach Recipient",
+  "Outreach Created At",
+  "Outreach Updated At",
+  "Latest Generation Status",
+  "Unread Reply Count",
+  "Last Reply At",
+] as const;
+
 const sortSummaryLabels: Record<OpportunitySort, string> = {
   score_desc: "Sorted by score: high to low",
   score_asc: "Sorted by score: low to high",
   contact_present: "Sorted by contact: provided first",
   contact_missing: "Sorted by contact: missing first",
   latest_reply: "Sorted by latest reply",
+  created_desc: "Sorted by date added: newest first",
+  created_asc: "Sorted by date added: oldest first",
 };
 
 const scoreFormatter = new Intl.NumberFormat(undefined, {
@@ -259,11 +320,29 @@ function compareScores(a: Lead, b: Lead, direction: ScoreSort) {
   return direction === "desc" ? b.score - a.score : a.score - b.score;
 }
 
+function compareLeadIds(a: Lead, b: Lead) {
+  return a.id.localeCompare(b.id);
+}
+
+function compareCreatedAt(a: Lead, b: Lead, direction: ScoreSort) {
+  const aTime = Date.parse(a.created_at);
+  const bTime = Date.parse(b.created_at);
+  const aValid = !Number.isNaN(aTime);
+  const bValid = !Number.isNaN(bTime);
+  if (aValid !== bValid) return aValid ? -1 : 1;
+  if (aValid && bValid && aTime !== bTime) {
+    return direction === "desc" ? bTime - aTime : aTime - bTime;
+  }
+  return compareScores(a, b, "desc") || compareLeadIds(a, b);
+}
+
 function hasContact(lead: Lead) {
   return Boolean(lead.contacts?.trim() || lead.contact_email?.trim());
 }
 
 function compareLeads(a: Lead, b: Lead, sort: OpportunitySort) {
+  if (sort === "created_desc") return compareCreatedAt(a, b, "desc");
+  if (sort === "created_asc") return compareCreatedAt(a, b, "asc");
   if (sort === "latest_reply") {
     const aTime = a.last_reply_at ? Date.parse(a.last_reply_at) : Number.NEGATIVE_INFINITY;
     const bTime = b.last_reply_at ? Date.parse(b.last_reply_at) : Number.NEGATIVE_INFINITY;
@@ -284,7 +363,13 @@ function compareLeads(a: Lead, b: Lead, sort: OpportunitySort) {
 
 function parseOpportunitySort(value: string | null): OpportunitySort {
   if (value === "asc") return "score_asc";
-  if (value === "contact_present" || value === "contact_missing" || value === "latest_reply") return value;
+  if (
+    value === "contact_present"
+    || value === "contact_missing"
+    || value === "latest_reply"
+    || value === "created_desc"
+    || value === "created_asc"
+  ) return value;
   return "score_desc";
 }
 
@@ -294,13 +379,16 @@ function sortQueryValue(sort: OpportunitySort) {
   return sort;
 }
 
-function sortIcon(activeSort: OpportunitySort, column: "contact" | "score") {
+function sortIcon(activeSort: OpportunitySort, column: "contact" | "score" | "created") {
   if (column === "contact") {
     if (activeSort === "contact_present") return <ArrowDown aria-hidden="true" size={14} />;
     if (activeSort === "contact_missing") return <ArrowUp aria-hidden="true" size={14} />;
-  } else {
+  } else if (column === "score") {
     if (activeSort === "score_desc") return <ArrowDown aria-hidden="true" size={14} />;
     if (activeSort === "score_asc") return <ArrowUp aria-hidden="true" size={14} />;
+  } else {
+    if (activeSort === "created_desc") return <ArrowDown aria-hidden="true" size={14} />;
+    if (activeSort === "created_asc") return <ArrowUp aria-hidden="true" size={14} />;
   }
   return <ArrowUpDown aria-hidden="true" size={14} />;
 }
@@ -325,6 +413,61 @@ function matchesOutreachFilter(lead: Lead, filter: OutreachFilter) {
   if (filter === "generation_issues") return generationHasIssue(lead);
   if (filter === "no_email") return !lead.current_email && !generationIsActive(lead);
   return lead.current_email?.status === filter;
+}
+
+function opportunityOutreachStatus(lead: Lead) {
+  if (lead.current_email) return lead.current_email.status;
+  if (generationIsActive(lead)) return "generating";
+  if (generationHasIssue(lead)) return "generation_issue";
+  return "no_email";
+}
+
+function opportunityExportRow(lead: Lead): CsvValue[] {
+  return [
+    lead.id,
+    lead.external_id,
+    lead.review_status,
+    lead.created_at,
+    lead.source_feed,
+    lead.url,
+    lead.project,
+    lead.section,
+    lead.location,
+    lead.state,
+    lead.score,
+    lead.timing,
+    normalizeDateForCsv(lead.meeting_date),
+    lead.due_date,
+    lead.award_date,
+    lead.start_date,
+    lead.awarded_to,
+    lead.contacts,
+    lead.contact_email,
+    lead.signal,
+    lead.intelligence,
+    lead.priority_reasons,
+    lead.summary,
+    lead.tags,
+    lead.keywords_matched,
+    lead.reported,
+    lead.response_deadline_evidence,
+    lead.deleted_by,
+    lead.deleted_reasons,
+    opportunityOutreachStatus(lead),
+    lead.current_email?.recipient_email,
+    lead.current_email?.created_at,
+    lead.current_email?.updated_at,
+    lead.latest_generation?.status,
+    lead.unread_reply_count ?? 0,
+    lead.last_reply_at,
+  ];
+}
+
+function exportDateStamp(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function OpportunityOutreachBadges({ lead }: { lead: Lead }) {
@@ -383,6 +526,10 @@ function OpportunityCard({ lead }: { lead: Lead }) {
         <div>
           <dt>Signal</dt>
           <dd>{displayValue(lead.signal)}</dd>
+        </div>
+        <div>
+          <dt>Date added</dt>
+          <dd>{formatDate(lead.created_at)}</dd>
         </div>
         <div>
           <dt>Outreach</dt>
@@ -551,6 +698,27 @@ export function OpportunitiesPage() {
   const isMutating = syncMutation.isPending || uploadMutation.isPending;
   const automaticSyncActive = automaticSyncIsActive(latestAutomaticRun?.status);
   const manualSyncDisabled = isMutating || automaticSyncActive;
+  const exportDisabled = leadsQuery.isPending || leadsQuery.isError || filteredLeads.length === 0;
+
+  const exportOpportunities = () => {
+    try {
+      const csv = createCsv(
+        opportunityExportHeaders,
+        filteredLeads.map(opportunityExportRow),
+      );
+      downloadCsv(
+        `accoya-opportunities-${view}-${exportDateStamp(new Date())}.csv`,
+        csv,
+      );
+      toast.success("Opportunities exported", {
+        description: `${filteredLeads.length} ${filteredLeads.length === 1 ? "opportunity" : "opportunities"} downloaded.`,
+      });
+    } catch (error) {
+      toast.error("Could not export opportunities", {
+        description: errorMessage(error, "Please try again."),
+      });
+    }
+  };
 
   const actions = (
     <div className={styles.headerActions}>
@@ -566,6 +734,15 @@ export function OpportunitiesPage() {
           event.target.value = "";
         }}
       />
+      <button
+        className={styles.secondaryButton}
+        type="button"
+        disabled={exportDisabled}
+        onClick={exportOpportunities}
+      >
+        <Download aria-hidden="true" size={17} />
+        Export CSV
+      </button>
       <button
         className={styles.secondaryButton}
         type="button"
@@ -727,6 +904,21 @@ export function OpportunitiesPage() {
               </select>
             </label>
 
+            <label className={styles.selectField}>
+              <span>Sort by</span>
+              <select
+                value={opportunitySort}
+                onChange={(event) => updateParam(
+                  "sort",
+                  sortQueryValue(event.target.value as OpportunitySort),
+                )}
+              >
+                {sortOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+
             <button
               className={styles.clearButton}
               type="button"
@@ -766,6 +958,32 @@ export function OpportunitiesPage() {
                       <th scope="col">Project</th>
                       <th scope="col">Location</th>
                       <th scope="col">Timing</th>
+                      <th
+                        scope="col"
+                        className={styles.sortableColumn}
+                        aria-sort={opportunitySort === "created_desc"
+                          ? "descending"
+                          : opportunitySort === "created_asc"
+                            ? "ascending"
+                            : undefined}
+                      >
+                        <button
+                          type="button"
+                          className={styles.columnSortButton}
+                          aria-label={opportunitySort === "created_desc"
+                            ? "Sort date added oldest first"
+                            : "Sort date added newest first"}
+                          onClick={() => updateParam(
+                            "sort",
+                            sortQueryValue(
+                              opportunitySort === "created_desc" ? "created_asc" : "created_desc",
+                            ),
+                          )}
+                        >
+                          Date added
+                          {sortIcon(opportunitySort, "created")}
+                        </button>
+                      </th>
                       <th
                         scope="col"
                         className={styles.sortableColumn}
@@ -860,6 +1078,7 @@ export function OpportunitiesPage() {
                           </span>
                         </td>
                         <td>{displayValue(lead.timing)}</td>
+                        <td className={styles.dateCell}>{formatDate(lead.created_at)}</td>
                         <td>
                           <span className={styles.contactCell}>
                             {lead.contacts || "Not provided"}
