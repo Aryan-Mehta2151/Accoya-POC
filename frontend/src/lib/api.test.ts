@@ -93,6 +93,33 @@ describe('API client', () => {
     });
   });
 
+  it('loads Overview totals with an encoded optional timestamp range', async () => {
+    let capturedUrl = '';
+    server.use(
+      http.get(`${base}/overview/summary`, ({ request }) => {
+        capturedUrl = request.url;
+        return HttpResponse.json({
+          opportunities: 4,
+          needs_review: 2,
+          sent: 1,
+          replies: 3,
+          reply_sync_status: 'healthy',
+          reply_last_synced_at: '2026-07-31T23:00:00Z',
+        });
+      }),
+    );
+
+    const result = await api.getOverviewSummary({
+      start_at: '2026-07-01T07:00:00.000Z',
+      end_before: '2026-08-01T07:00:00.000Z',
+    });
+
+    const url = new URL(capturedUrl);
+    expect(url.searchParams.get('start_at')).toBe('2026-07-01T07:00:00.000Z');
+    expect(url.searchParams.get('end_before')).toBe('2026-08-01T07:00:00.000Z');
+    expect(result).toMatchObject({ opportunities: 4, replies: 3 });
+  });
+
   it('preserves friendly generation queue errors and warnings', async () => {
     server.use(
       http.post(`${base}/leads/lead-1/email-generations`, () => HttpResponse.json(

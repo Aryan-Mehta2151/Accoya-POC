@@ -10,6 +10,7 @@ import type {
   EmailStatus,
   Lead,
   LeadWorkspace,
+  OverviewSummary,
   StrategyDocument,
   SyncResult,
 } from '../types';
@@ -360,6 +361,15 @@ export const api = {
     }),
 
   listEmails: () => request<Email[]>('/emails'),
+  getOverviewSummary: (range?: { start_at: string; end_before: string }) => {
+    const query = range
+      ? `?${new URLSearchParams({
+          start_at: range.start_at,
+          end_before: range.end_before,
+        }).toString()}`
+      : '';
+    return request<OverviewSummary>(`/overview/summary${query}`);
+  },
   getEmailReplySummary: () => request<EmailReplySummary>('/email-replies/summary'),
   getEmail: (emailId: string) =>
     request<Email>(`/emails/${encodeURIComponent(emailId)}`),

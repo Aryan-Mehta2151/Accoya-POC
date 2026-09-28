@@ -624,6 +624,23 @@ def reply_summary(
             EmailReply.removed_at.is_(None),
         )
     ).one()
+    health = reply_sync_health(db, settings=settings, now=now)
+    return {
+        "unread_reply_count": int(counts[0] or 0),
+        "replied_opportunity_count": int(counts[1] or 0),
+        "last_synced_at": health["last_synced_at"],
+        "sync_status": health["sync_status"],
+    }
+
+
+def reply_sync_health(
+    db: Session,
+    *,
+    settings: Settings,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Return mailbox synchronization health without querying reply totals."""
+
     state = db.get(
         GraphMailboxSyncState,
         str(settings.microsoft_sender_email).strip().casefold(),
@@ -641,8 +658,6 @@ def reply_summary(
     else:
         sync_status = "healthy"
     return {
-        "unread_reply_count": int(counts[0] or 0),
-        "replied_opportunity_count": int(counts[1] or 0),
         "last_synced_at": last_sync,
         "sync_status": sync_status,
     }

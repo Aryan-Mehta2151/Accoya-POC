@@ -52,6 +52,15 @@ export type EmailReplySummary = {
   sync_status: EmailReplySyncStatus;
 };
 
+export type OverviewSummary = {
+  opportunities: number;
+  needs_review: number;
+  sent: number;
+  replies: number;
+  reply_sync_status: EmailReplySyncStatus;
+  reply_last_synced_at: string | null;
+};
+
 export type SyncResult = {
   created: number;
   updated: number;

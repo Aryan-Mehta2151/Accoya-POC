@@ -7,6 +7,7 @@ import {
   MessageCircleReply,
   Target,
 } from 'lucide-react';
+import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { ErrorState, LoadingState, PageHeader, StatusBadge } from '../../components/ui';
 import { api } from '../../lib/api';
@@ -14,6 +15,23 @@ import { formatDate, formatLocation, formatScore } from '../../lib/format';
 import { queryKeys } from '../../lib/queryKeys';
 import type { Email } from '../../types';
 import styles from './overview.module.css';
+
+type AppliedRange = {
+  startAt: string;
+  endBefore: string;
+};
+
+function localDate(value: string, nextDay = false): Date {
+  const [year, month, day] = value.split('-').map(Number);
+  return new Date(year, month - 1, day + (nextDay ? 1 : 0));
+}
+
+function apiRange(startDate: string, endDate: string): AppliedRange {
+  return {
+    startAt: localDate(startDate).toISOString(),
+    endBefore: localDate(endDate, true).toISOString(),
+  };
+}
 
 function newestEmailsByLead(emails: Email[]): Email[] {
   const newest = new Map<string, Email>();
@@ -32,22 +50,36 @@ function newestEmailsByLead(emails: Email[]): Email[] {
 }
 
 export function OverviewPage() {
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  const [rangeError, setRangeError] = useState('');
+  const [appliedRange, setAppliedRange] = useState<AppliedRange | null>(null);
   const leadsQuery = useQuery({
     queryKey: queryKeys.leads,
     queryFn: () => api.listLeads(),
     refetchInterval: 60_000,
   });
   const emailsQuery = useQuery({ queryKey: queryKeys.emails, queryFn: api.listEmails });
-  const repliesQuery = useQuery({
-    queryKey: queryKeys.emailReplySummary,
-    queryFn: api.getEmailReplySummary,
+  const summaryQuery = useQuery({
+    queryKey: queryKeys.overviewSummary(
+      appliedRange?.startAt,
+      appliedRange?.endBefore,
+    ),
+    queryFn: () => api.getOverviewSummary(
+      appliedRange
+        ? {
+            start_at: appliedRange.startAt,
+            end_before: appliedRange.endBefore,
+          }
+        : undefined,
+    ),
     refetchInterval: 30_000,
     refetchOnWindowFocus: true,
   });
   const documentsQuery = useQuery({ queryKey: queryKeys.documents, queryFn: api.listDocuments });
 
-  const isInitialLoading = leadsQuery.isLoading && emailsQuery.isLoading && repliesQuery.isLoading && documentsQuery.isLoading;
-  const allFailed = leadsQuery.isError && emailsQuery.isError && repliesQuery.isError && documentsQuery.isError;
+  const isInitialLoading = leadsQuery.isLoading && emailsQuery.isLoading && summaryQuery.isLoading && documentsQuery.isLoading;
+  const allFailed = leadsQuery.isError && emailsQuery.isError && summaryQuery.isError && documentsQuery.isError;
 
   if (isInitialLoading) return <LoadingState label='Preparing your workspace…' />;
   if (allFailed) {
@@ -58,7 +90,7 @@ export function OverviewPage() {
         onRetry={() => void Promise.all([
           leadsQuery.refetch(),
           emailsQuery.refetch(),
-          repliesQuery.refetch(),
+          summaryQuery.refetch(),
           documentsQuery.refetch(),
         ])}
       />
@@ -67,16 +99,34 @@ export function OverviewPage() {
 
   const leads = leadsQuery.data ?? [];
   const emails = emailsQuery.data ?? [];
-  const replies = repliesQuery.data;
+  const summary = summaryQuery.data;
   const documents = documentsQuery.data ?? [];
-  const replyTotalsCurrent = !repliesQuery.isError && replies?.sync_status === 'healthy';
+  const replyTotalsCurrent = !summaryQuery.isError && summary?.reply_sync_status === 'healthy';
   const activeLeadIds = new Set(leads.map((lead) => lead.id));
   const currentEmails = newestEmailsByLead(emails).filter((email) => activeLeadIds.has(email.lead_id));
-  const pending = currentEmails.filter((email) => email.status === 'pending_review');
-  const sent = currentEmails.filter((email) => email.status === 'sent');
-  const emailMetricsUnavailable = leadsQuery.isError || emailsQuery.isError;
   const topLeads = leads.slice(0, 5);
   const recentEmails = currentEmails.slice(0, 5);
+
+  const applyRange = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!startDate || !endDate) {
+      setRangeError('Enter both a start date and an end date.');
+      return;
+    }
+    if (startDate > endDate) {
+      setRangeError('Start date must be on or before end date.');
+      return;
+    }
+    setRangeError('');
+    setAppliedRange(apiRange(startDate, endDate));
+  };
+
+  const clearRange = () => {
+    setStartDate('');
+    setEndDate('');
+    setRangeError('');
+    setAppliedRange(null);
+  };
 
   return (
     <div>
@@ -91,31 +141,67 @@ export function OverviewPage() {
         }
       />
 
-      {(leadsQuery.isError || emailsQuery.isError || repliesQuery.isError || documentsQuery.isError) && (
+      {(leadsQuery.isError || emailsQuery.isError || summaryQuery.isError || documentsQuery.isError) && (
         <div className={styles.partialNotice} role='status'>
           Some live totals are temporarily unavailable. The rest of your workspace is ready.
         </div>
       )}
 
+      <form className={styles.dateFilter} aria-label='Overview date range' onSubmit={applyRange}>
+        <div className={styles.dateFilterCopy}>
+          <strong>Reporting period</strong>
+          <span>{appliedRange ? 'Showing the selected date range' : 'Showing all time'}</span>
+        </div>
+        <label>
+          <span>Start date</span>
+          <input
+            type='date'
+            value={startDate}
+            aria-invalid={Boolean(rangeError)}
+            onChange={(event) => setStartDate(event.target.value)}
+          />
+        </label>
+        <label>
+          <span>End date</span>
+          <input
+            type='date'
+            value={endDate}
+            aria-invalid={Boolean(rangeError)}
+            onChange={(event) => setEndDate(event.target.value)}
+          />
+        </label>
+        <div className={styles.dateFilterActions}>
+          <button className='button buttonPrimary' type='submit'>Apply</button>
+          <button
+            className='button buttonGhost'
+            type='button'
+            disabled={!startDate && !endDate && !appliedRange}
+            onClick={clearRange}
+          >
+            Clear
+          </button>
+        </div>
+        {rangeError ? <p className={styles.dateError} role='alert'>{rangeError}</p> : null}
+      </form>
+
       <section className={styles.metrics} aria-label='Workspace summary'>
-        <Metric icon={<Target />} label='Opportunities' value={leadsQuery.isError ? '—' : leads.length} tone='forest' to='/opportunities' />
-        <Metric icon={<MailCheck />} label='Needs review' value={emailMetricsUnavailable ? '—' : pending.length} tone='clay' to='/opportunities?outreach=pending_review' />
-        <Metric icon={<CircleCheck />} label='Sent' value={emailMetricsUnavailable ? '—' : sent.length} tone='timber' to='/opportunities?outreach=sent' />
-        {replies?.sync_status !== 'disabled' ? (
+        <Metric icon={<Target />} label='Opportunities' value={summaryQuery.isError ? '—' : (summary?.opportunities ?? '—')} tone='forest' />
+        <Metric icon={<MailCheck />} label='Needs review' value={summaryQuery.isError ? '—' : (summary?.needs_review ?? '—')} tone='clay' />
+        <Metric icon={<CircleCheck />} label='Sent' value={summaryQuery.isError ? '—' : (summary?.sent ?? '—')} tone='timber' />
+        {summary?.reply_sync_status !== 'disabled' ? (
           <Metric
             icon={<MessageCircleReply />}
-            label='Unread replies'
-            value={replyTotalsCurrent ? replies.unread_reply_count : '—'}
+            label='Replies'
+            value={replyTotalsCurrent ? summary.replies : '—'}
             tone='mist'
-            to='/opportunities?replies=unread&sort=latest_reply'
           />
         ) : null}
         <Metric icon={<BookOpenText />} label='Strategy docs' value={documentsQuery.isError ? '—' : documents.length} tone='sage' to='/knowledge' />
       </section>
 
-      {(repliesQuery.isError || (replies && replies.sync_status !== 'healthy' && replies.sync_status !== 'disabled')) ? (
+      {(summaryQuery.isError || (summary && summary.reply_sync_status !== 'healthy' && summary.reply_sync_status !== 'disabled')) ? (
         <div className={styles.replyNotice} role='status'>
-          Reply totals are {!repliesQuery.isError && replies?.sync_status === 'initializing' ? 'being prepared' : 'temporarily unavailable'}; cached data is not shown as current.
+          Reply totals are {!summaryQuery.isError && summary?.reply_sync_status === 'initializing' ? 'being prepared' : 'temporarily unavailable'}; cached data is not shown as current.
         </div>
       ) : null}
 
@@ -185,13 +271,23 @@ export function OverviewPage() {
   );
 }
 
-function Metric({ icon, label, value, tone, to }: { icon: React.ReactNode; label: string; value: number | string; tone: string; to: string }) {
-  return (
-    <Link className={`${styles.metric} ${styles[tone]}`} to={to} aria-label={`${label}: ${String(value)}`}>
+function Metric({ icon, label, value, tone, to }: { icon: React.ReactNode; label: string; value: number | string; tone: string; to?: string }) {
+  const content = (
+    <>
       <span className={styles.metricIcon} aria-hidden='true'>{icon}</span>
       <strong>{value}</strong>
       <span>{label}</span>
+    </>
+  );
+  const className = `${styles.metric} ${styles[tone]} ${to ? styles.metricLink : ''}`;
+  return to ? (
+    <Link className={className} to={to} aria-label={`${label}: ${String(value)}`}>
+      {content}
     </Link>
+  ) : (
+    <article className={className} aria-label={`${label}: ${String(value)}`}>
+      {content}
+    </article>
   );
 }
 

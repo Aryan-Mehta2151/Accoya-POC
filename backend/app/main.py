@@ -15,6 +15,7 @@ from app.api.routes import (
     emails,
     graph_webhooks,
     leads,
+    overview,
 )
 from app.config import get_settings
 from app.db.database import check_database_schema
@@ -84,6 +85,7 @@ protected_api.include_router(leads.router)
 protected_api.include_router(documents.router)
 protected_api.include_router(emails.router)
 protected_api.include_router(email_replies.router)
+protected_api.include_router(overview.router)
 protected_api.include_router(agent_runs.router)
 protected_api.include_router(chat.router)
 
